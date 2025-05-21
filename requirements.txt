@@ -1,0 +1,8 @@
+click
+datasets
+pytest
+pytest-mock
+pytest-cov
+boto3 
+botocore
+python-dotenv
