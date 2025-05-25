@@ -191,6 +191,8 @@ def _get_s3_public_url(bucket_name: str, s3_key: str, endpoint_url: Optional[str
     """Constructs a public HTTPS URL for an S3 object. s3_key is the full key (including any S3_DATA_PREFIX path)."""
     if endpoint_url:
         scheme = "https://" 
+        if endpoint_url.startswith("http://"):
+            scheme = "http://"
         host_part = endpoint_url.replace("https://", "").replace("http://", "")
         clean_host_part = host_part.rstrip('/')
         return f"{scheme}{bucket_name}.{clean_host_part}/{s3_key.lstrip('/')}"

@@ -441,7 +441,7 @@ def test_get_cached_dataset_card_content_not_found_anywhere(temp_datasets_store,
     retrieved_content = get_cached_dataset_card_content(dataset_id)
     assert retrieved_content is None
     captured = capsys.readouterr()
-    assert "Dataset card not found locally" in captured.out
+    assert "Dataset card not found or readable locally" in captured.out
     assert "Dataset card not found on S3" in captured.out
 
 
@@ -666,3 +666,463 @@ def test_list_s3_datasets_no_creds_fallback_to_public_json_with_data(
 # More complex tests for list_s3_datasets with S3 client (mocking paginator) should be added.
 # These would be similar to how they might have been in test_core.py but now using
 # mock_s3_utils_for_dm["s3_client_instance"] and its paginator.
+
+# --- Sync Local to S3 Functions Tests ---
+
+def test_sync_local_dataset_to_s3_local_not_found(
+    temp_datasets_store, mock_s3_utils_for_dm, capsys
+):
+    dataset_id = "sync_local_missing_ds"
+    # Ensure local path does NOT exist or is incomplete
+    # _get_dataset_path will use temp_datasets_store
+
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
+
+    success, msg = sync_local_dataset_to_s3(dataset_id)
+    assert success is False
+    assert "Local dataset sync_local_missing_ds (config: default, revision: default) not found or is incomplete" in msg
+    captured = capsys.readouterr()
+    assert "Cannot sync." in captured.out
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].assert_not_called()
+    mock_s3_utils_for_dm["_upload_directory_to_s3"].assert_not_called()
+
+
+def test_sync_local_dataset_to_s3_s3_not_configured(
+    temp_datasets_store, mock_s3_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_s3_no_config_ds"
+    ds_path = _get_dataset_path(dataset_id)
+    os.makedirs(ds_path, exist_ok=True)
+    (ds_path / "dataset_info.json").touch() # Local dataset exists
+
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', None)
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = None
+
+    success, msg = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    assert success is False
+    assert "S3 not configured" in msg
+    assert "Cannot make dataset public" in msg # Because make_public was True
+    captured = capsys.readouterr()
+    assert "Cannot sync to S3." in captured.out
+
+
+def test_sync_local_dataset_to_s3_private_exists_no_make_public(
+    temp_datasets_store, mock_s3_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_priv_exists_ds"
+    s3_bucket_val = "sync-bucket"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k"); monkeypatch.setattr('hg_localization.dataset_manager.AWS_ACCESS_KEY_ID', "k")
+
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True # Private S3 copy exists
+
+    success, msg = sync_local_dataset_to_s3(dataset_id, make_public=False)
+
+    assert success is True
+    # Message can vary slightly based on whether public section is entered due to make_public=False
+    # So check for either the specific message or the general success message.
+    assert mock_s3_utils_for_dm["_check_s3_dataset_exists"].call_count == 1
+    captured_out = capsys.readouterr().out
+    assert f"Dataset {dataset_id} (config: default, revision: default) already exists as private S3 copy" in captured_out
+    mock_s3_utils_for_dm["_upload_directory_to_s3"].assert_not_called()
+    mock_s3_cli.head_object.assert_not_called()
+
+
+def test_sync_local_dataset_to_s3_private_upload_success_no_make_public(
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_priv_upload_ds"
+    s3_bucket_val = "sync-upload-bucket"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k"); monkeypatch.setattr('hg_localization.dataset_manager.AWS_ACCESS_KEY_ID', "k")
+
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = False # Private S3 copy does NOT exist
+
+    success, msg = sync_local_dataset_to_s3(dataset_id, make_public=False)
+
+    assert success is True
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].assert_called_once()
+    mock_s3_utils_for_dm["_upload_directory_to_s3"].assert_called_once_with(mock_s3_cli, ds_path, s3_bucket_val, "mocked/s3/prefix")
+    captured = capsys.readouterr()
+    assert f"Successfully uploaded dataset '{dataset_id}'" in captured.out
+    assert "(private)." in captured.out
+    mock_s3_cli.head_object.assert_not_called() # No make_public part
+
+
+def test_sync_local_dataset_to_s3_private_upload_fails(
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_priv_upload_fail_ds"
+    s3_bucket_val = "sync-upload-fail-bucket"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k"); monkeypatch.setattr('hg_localization.dataset_manager.AWS_ACCESS_KEY_ID', "k")
+
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = False
+    mock_s3_utils_for_dm["_upload_directory_to_s3"].side_effect = Exception("S3 priv upload error")
+
+    success, msg = sync_local_dataset_to_s3(dataset_id, make_public=False)
+
+    assert success is False
+    assert "Error uploading dataset" in msg
+    assert "S3 priv upload error" in msg
+    mock_s3_utils_for_dm["_upload_directory_to_s3"].assert_called_once()
+    captured = capsys.readouterr()
+    assert "(private): S3 priv upload error" in captured.out
+
+@patch('tempfile.TemporaryDirectory')
+@patch('tempfile.NamedTemporaryFile')
+@patch('os.remove')
+@patch('shutil.copytree')
+def test_sync_local_dataset_s3_make_public_full_success_private_not_exist_initially(
+    mock_shutil_copytree, mock_os_remove, mock_temp_named_file, mock_temp_dir,
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_pub_full_priv_not_exist_ds"
+    s3_bucket_val = "sync-pub-full-privnotexist-bucket"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k"); monkeypatch.setattr('hg_localization.dataset_manager.AWS_ACCESS_KEY_ID', "k")
+
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = False # Private copy does NOT initially exist
+    # mock_s3_utils_for_dm["_upload_directory_to_s3"] will be called and should succeed (default mock behavior)
+    mock_s3_cli.head_object.side_effect = ClientError({'Error': {'Code': '404'}}, 'HeadObject') # Public zip does NOT exist
+    mock_utils_for_dm["_zip_directory"].return_value = True
+    mock_s3_utils_for_dm["_update_public_datasets_json"].return_value = True
+
+    mock_temp_dir_context = MagicMock(); mock_temp_dir.return_value = mock_temp_dir_context
+    mock_temp_dir_context.__enter__.return_value = "/mock_tmp_sync_pub2"
+    mock_tmp_zip_file_obj = MagicMock(); mock_tmp_zip_file_obj.name = "/mock_tmp_sync_pub2.zip"
+    mock_temp_named_file_context = MagicMock(); mock_temp_named_file.return_value = mock_temp_named_file_context
+    mock_temp_named_file_context.__enter__.return_value = mock_tmp_zip_file_obj
+
+    success, _ = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    assert success is True
+    mock_s3_utils_for_dm["_upload_directory_to_s3"].assert_called_once() # Private is uploaded first
+    # ... rest of checks for public part are similar to test_sync_local_dataset_to_s3_make_public_full_success_private_exists ...
+    mock_shutil_copytree.assert_called_once()
+    mock_utils_for_dm["_zip_directory"].assert_called_once()
+    mock_s3_cli.upload_file.assert_called_once() # For public zip
+    mock_s3_utils_for_dm["_update_public_datasets_json"].assert_called_once()
+    mock_os_remove.assert_called_once()
+    captured = capsys.readouterr()
+    assert "Successfully uploaded dataset" in captured.out # For private
+    assert "Successfully uploaded public zip" in captured.out
+
+@patch('tempfile.TemporaryDirectory')
+@patch('tempfile.NamedTemporaryFile')
+@patch('os.remove')
+@patch('shutil.copytree')
+def test_sync_local_dataset_to_s3_make_public_full_success_private_exists(
+    mock_shutil_copytree, mock_os_remove, mock_temp_named_file, mock_temp_dir,
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_pub_full_priv_exists_ds"
+    s3_bucket_val = "sync-pub-full-bucket"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k"); monkeypatch.setattr('hg_localization.dataset_manager.AWS_ACCESS_KEY_ID', "k")
+
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True # Private copy exists
+    mock_s3_cli.head_object.side_effect = ClientError({'Error': {'Code': '404'}}, 'HeadObject')
+    mock_utils_for_dm["_zip_directory"].return_value = True
+    mock_s3_utils_for_dm["_update_public_datasets_json"].return_value = True
+
+    mock_temp_dir_context = MagicMock(); mock_temp_dir.return_value = mock_temp_dir_context
+    mock_temp_dir_context.__enter__.return_value = "/mock_tmp_sync_pub"
+    mock_tmp_zip_file_obj = MagicMock(); mock_tmp_zip_file_obj.name = "/mock_tmp_sync_pub.zip"
+    mock_temp_named_file_context = MagicMock(); mock_temp_named_file.return_value = mock_temp_named_file_context
+    mock_temp_named_file_context.__enter__.return_value = mock_tmp_zip_file_obj
+
+    success, _ = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    assert success is True
+    mock_s3_utils_for_dm["_upload_directory_to_s3"].assert_not_called()
+    
+    safe_id = mock_utils_for_dm["_get_safe_path_component"](dataset_id)
+    expected_zip_name = f"{safe_id}---{DEFAULT_CONFIG_NAME}---{DEFAULT_REVISION_NAME}.zip"
+    expected_s3_zip_key_full = f"global_prefix/{PUBLIC_DATASETS_ZIP_DIR_PREFIX}/{expected_zip_name}"
+    mock_s3_cli.head_object.assert_called_once_with(Bucket=s3_bucket_val, Key=expected_s3_zip_key_full)
+    
+    mock_shutil_copytree.assert_called_once_with(ds_path, Path("/mock_tmp_sync_pub") / "dataset_content_for_public_sync_zip")
+    mock_utils_for_dm["_zip_directory"].assert_called_once_with(Path("/mock_tmp_sync_pub") / "dataset_content_for_public_sync_zip", Path("/mock_tmp_sync_pub.zip"))
+    mock_s3_cli.upload_file.assert_called_once_with(str(Path("/mock_tmp_sync_pub.zip")), s3_bucket_val, expected_s3_zip_key_full, ExtraArgs={'ACL': 'public-read'})
+    
+    expected_base_s3_zip_key = f"{PUBLIC_DATASETS_ZIP_DIR_PREFIX}/{expected_zip_name}"
+    mock_s3_utils_for_dm["_update_public_datasets_json"].assert_called_once_with(mock_s3_cli, s3_bucket_val, dataset_id, None, None, expected_base_s3_zip_key)
+    mock_os_remove.assert_called_once_with(Path("/mock_tmp_sync_pub.zip"))
+    captured = capsys.readouterr()
+    assert "Successfully uploaded public zip" in captured.out
+    assert "Updating public_datasets.json" in captured.out
+
+
+def test_sync_local_dataset_to_s3_make_public_public_zip_already_exists(
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_pub_zip_exists_ds"
+    s3_bucket_val = "sync-pub-zip-exists-bucket"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k"); monkeypatch.setattr('hg_localization.dataset_manager.AWS_ACCESS_KEY_ID', "k")
+
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
+    mock_s3_cli.head_object.return_value = {} # Public zip exists
+    mock_s3_utils_for_dm["_update_public_datasets_json"].return_value = True
+
+    success, _ = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    assert success is True
+    mock_utils_for_dm["_zip_directory"].assert_not_called()
+    mock_s3_cli.upload_file.assert_not_called()
+    
+    safe_id = mock_utils_for_dm["_get_safe_path_component"](dataset_id)
+    expected_zip_name = f"{safe_id}---{DEFAULT_CONFIG_NAME}---{DEFAULT_REVISION_NAME}.zip"
+    expected_base_s3_zip_key = f"{PUBLIC_DATASETS_ZIP_DIR_PREFIX}/{expected_zip_name}"
+    mock_s3_utils_for_dm["_update_public_datasets_json"].assert_called_once_with(mock_s3_cli, s3_bucket_val, dataset_id, None, None, expected_base_s3_zip_key)
+    captured = capsys.readouterr()
+    assert "Public zip s3://" in captured.out
+    assert "already exists." in captured.out
+
+@patch('tempfile.TemporaryDirectory')
+@patch('tempfile.NamedTemporaryFile')
+@patch('os.remove')
+@patch('shutil.copytree')
+def test_sync_local_dataset_make_public_zip_creation_fails(
+    mock_shutil_copytree, mock_os_remove, mock_temp_named_file, mock_temp_dir,
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_pub_zipcreate_fail_ds"
+    s3_bucket_val = "sync-pub-zipcreate-fail-bucket"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val); monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k")
+
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True # Private exists
+    mock_s3_cli.head_object.side_effect = ClientError({'Error': {'Code': '404'}}, 'HeadObject') # Public zip not found
+    mock_utils_for_dm["_zip_directory"].return_value = False # Zipping fails
+
+    mock_temp_dir_context = MagicMock(); mock_temp_dir.return_value = mock_temp_dir_context
+    mock_temp_dir_context.__enter__.return_value = "/mock_tmp_sync_zipfail"
+    mock_tmp_zip_file_obj = MagicMock(); mock_tmp_zip_file_obj.name = "/mock_tmp_sync_zipfail.zip"
+    mock_temp_named_file_context = MagicMock(); mock_temp_named_file.return_value = mock_temp_named_file_context
+    mock_temp_named_file_context.__enter__.return_value = mock_tmp_zip_file_obj
+
+    success, _ = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    assert success is True # Overall success as private copy is there
+    mock_utils_for_dm["_zip_directory"].assert_called_once()
+    mock_s3_cli.upload_file.assert_not_called() # Public S3 zip upload
+    mock_s3_utils_for_dm["_update_public_datasets_json"].assert_not_called() # Manifest not updated
+    captured = capsys.readouterr()
+    assert "Failed to zip dataset at" in captured.out
+    assert "Skipping manifest update" in captured.out
+
+@patch('tempfile.TemporaryDirectory')
+@patch('tempfile.NamedTemporaryFile')
+@patch('os.remove')
+@patch('shutil.copytree')
+def test_sync_local_dataset_make_public_s3_zip_upload_fails(
+    mock_shutil_copytree, mock_os_remove, mock_temp_named_file, mock_temp_dir,
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_pub_s3zipupload_fail_ds"
+    # ... (Similar setup, but s3_client.upload_file for public zip fails)
+    s3_bucket_val = "s-p-s3zipfail-b"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val); monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k")
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
+    mock_s3_cli.head_object.side_effect = ClientError({'Error': {'Code': '404'}}, 'HeadObject')
+    mock_utils_for_dm["_zip_directory"].return_value = True # Zipping OK
+    mock_s3_cli.upload_file.side_effect = ClientError({'Error':{}}, 'UploadPart') # Public zip S3 upload fails
+
+    mock_temp_dir_context = MagicMock(); mock_temp_dir.return_value = mock_temp_dir_context; mock_temp_dir_context.__enter__.return_value = "/tmp_s3zipfail"
+    mock_tmp_zip_file_obj = MagicMock(); mock_tmp_zip_file_obj.name = "/tmp_s3zipfail.zip"
+    mock_temp_named_file_context = MagicMock(); mock_temp_named_file.return_value = mock_temp_named_file_context; mock_temp_named_file_context.__enter__.return_value = mock_tmp_zip_file_obj
+
+    success, _ = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    assert success is True
+    mock_s3_cli.upload_file.assert_called_once() # Attempted
+    mock_s3_utils_for_dm["_update_public_datasets_json"].assert_not_called()
+    captured = capsys.readouterr()
+    assert "Failed during public zip creation/upload" in captured.out
+    assert "Skipping manifest update" in captured.out
+
+@patch('tempfile.TemporaryDirectory')
+@patch('tempfile.NamedTemporaryFile')
+@patch('os.remove')
+@patch('shutil.copytree')
+def test_sync_local_dataset_make_public_json_update_fails(
+    mock_shutil_copytree, mock_os_remove, mock_temp_named_file, mock_temp_dir,
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_pub_jsonupdate_fail_ds"
+    # ... (Similar setup, but _update_public_datasets_json fails)
+    s3_bucket_val = "s-p-jsonupdatefail-b"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val); monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k")
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
+    mock_s3_cli.head_object.side_effect = ClientError({'Error': {'Code': '404'}}, 'HeadObject')
+    mock_utils_for_dm["_zip_directory"].return_value = True
+    # Public S3 zip upload is fine
+    mock_s3_utils_for_dm["_update_public_datasets_json"].return_value = False # JSON update fails
+
+    mock_temp_dir_context = MagicMock(); mock_temp_dir.return_value = mock_temp_dir_context; mock_temp_dir_context.__enter__.return_value = "/tmp_jsonfail"
+    mock_tmp_zip_file_obj = MagicMock(); mock_tmp_zip_file_obj.name = "/tmp_jsonfail.zip"
+    mock_temp_named_file_context = MagicMock(); mock_temp_named_file.return_value = mock_temp_named_file_context; mock_temp_named_file_context.__enter__.return_value = mock_tmp_zip_file_obj
+
+    success, _ = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    assert success is True
+    mock_s3_utils_for_dm["_update_public_datasets_json"].assert_called_once()
+    captured = capsys.readouterr()
+    assert "Successfully uploaded public zip" in captured.out
+    assert "Warning: Failed to update public datasets JSON" in captured.out
+
+
+def test_sync_local_dataset_make_public_but_private_upload_failed(
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_pub_privfail_ds"
+    s3_bucket_val = "sync-pub-privfail-bucket"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val); monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k")
+
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = False # Private does not exist
+    mock_s3_utils_for_dm["_upload_directory_to_s3"].side_effect = Exception("Private S3 died") # Private upload fails
+
+    success, msg = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    assert success is False # Overall failure as private part failed
+    assert "Private S3 died" in msg
+    captured = capsys.readouterr()
+    # The "Cannot make... public because its private S3 copy... failed to upload" message 
+    # is in an elif block that is not reached if the primary private upload itself raises an exception.
+    # The function correctly returns False and the error from the private upload attempt.
+    # So, we don't assert for "Cannot make" here.
+    assert "public because its private S3 copy does not exist or failed to upload" not in captured.out # Ensure the other message isn't there
+    mock_s3_cli.head_object.assert_not_called() # Public part not reached
+
+
+def test_sync_local_dataset_make_public_head_object_other_client_error(
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+):
+    dataset_id = "sync_pub_head_obj_err_ds"
+    s3_bucket_val = "sync-pub-head-err-bucket"
+    ds_path = _get_dataset_path(dataset_id); os.makedirs(ds_path, exist_ok=True); (ds_path / "dataset_info.json").touch()
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val); monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k")
+
+    mock_s3_cli = mock_s3_utils_for_dm["s3_client_instance"]
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_cli
+    mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True # Private exists
+    mock_s3_cli.head_object.side_effect = ClientError({'Error': {'Code': '500'}}, 'HeadObject') # Error checking public zip
+
+    success, _ = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    assert success is True # Still true as private copy fine, public part skipped due to error
+    mock_s3_cli.head_object.assert_called_once()
+    mock_utils_for_dm["_zip_directory"].assert_not_called()
+    captured = capsys.readouterr()
+    assert "Error checking for existing public zip" in captured.out
+    assert "Skipping make_public actions." in captured.out
+
+# --- Tests for sync_all_local_to_s3 ---
+
+@patch('hg_localization.dataset_manager.list_local_datasets')
+@patch('hg_localization.dataset_manager.sync_local_dataset_to_s3')
+def test_sync_all_local_to_s3_no_local_datasets(
+    mock_sync_local_ds, mock_list_local, mock_s3_utils_for_dm, monkeypatch, capsys
+):
+    mock_list_local.return_value = []
+    # Ensure S3 client check passes, otherwise it exits early for S3 config reasons
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', "bucket")
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
+
+    sync_all_local_to_s3(make_public=False)
+    mock_list_local.assert_called_once()
+    mock_sync_local_ds.assert_not_called()
+    captured = capsys.readouterr()
+    assert "No local datasets found in cache to sync." in captured.out
+
+@patch('hg_localization.dataset_manager.list_local_datasets')
+@patch('hg_localization.dataset_manager.sync_local_dataset_to_s3')
+def test_sync_all_local_to_s3_s3_not_configured(
+    mock_sync_local_ds, mock_list_local, mock_s3_utils_for_dm, monkeypatch, capsys
+):
+    mock_list_local.return_value = [{"dataset_id": "ds1"}] # Some local data exists
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', None)
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = None
+
+    sync_all_local_to_s3(make_public=True)
+    # list_local_datasets is called before the S3 check in sync_all_local_to_s3
+    mock_list_local.assert_called_once()
+    # The S3 client check happens *after* listing local datasets
+    mock_s3_utils_for_dm["_get_s3_client"].assert_called_once() 
+    mock_sync_local_ds.assert_not_called()
+    captured = capsys.readouterr()
+    assert "S3 not configured (bucket name or client init failed). Cannot sync any datasets to S3." in captured.out
+    assert "Cannot make datasets public." in captured.out
+
+
+@patch('hg_localization.dataset_manager.list_local_datasets')
+@patch('hg_localization.dataset_manager.sync_local_dataset_to_s3')
+def test_sync_all_local_to_s3_multiple_datasets_mixed_results(
+    mock_sync_local_ds, mock_list_local, mock_s3_utils_for_dm, monkeypatch, capsys
+):
+    s3_bucket_val = "all-sync-bucket"
+    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "k"); monkeypatch.setattr('hg_localization.dataset_manager.AWS_ACCESS_KEY_ID', "k")
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
+
+    local_datasets_list = [
+        {"dataset_id": "ds_ok", "config_name": "cfg_a", "revision": "rev_1"},
+        {"dataset_id": "ds_fail", "config_name": None, "revision": "rev_2"},
+        {"dataset_id": "ds_ok_again"} 
+    ]
+    mock_list_local.return_value = local_datasets_list
+
+    def sync_side_effect(dataset_id, config_name, revision, make_public):
+        if dataset_id == "ds_ok":
+            return True, "Synced ds_ok"
+        elif dataset_id == "ds_fail":
+            return False, "Failed ds_fail"
+        elif dataset_id == "ds_ok_again":
+            return True, "Synced ds_ok_again"
+        return False, "Unknown ds"
+    mock_sync_local_ds.side_effect = sync_side_effect
+
+    sync_all_local_to_s3(make_public=True)
+
+    mock_list_local.assert_called_once()
+    assert mock_sync_local_ds.call_count == len(local_datasets_list)
+    expected_calls = [
+        call("ds_ok", "cfg_a", "rev_1", make_public=True),
+        call("ds_fail", None, "rev_2", make_public=True),
+        call("ds_ok_again", None, None, make_public=True) 
+    ]
+    mock_sync_local_ds.assert_has_calls(expected_calls, any_order=False)
+
+    captured = capsys.readouterr()
+    assert "Starting sync of all local datasets to S3. Make public: True" in captured.out
+    assert "--- Processing local dataset for sync: ID='ds_ok', Config='cfg_a', Revision='rev_1' ---" in captured.out
+    assert "--- Processing local dataset for sync: ID='ds_fail', Config='None', Revision='rev_2' ---" in captured.out
+    assert "--- Processing local dataset for sync: ID='ds_ok_again', Config='None', Revision='None' ---" in captured.out
+    assert "Total local datasets processed: 3" in captured.out
+    assert "Successfully processed (primary sync action): 2" in captured.out
+    assert "Failed to process (see logs for errors): 1" in captured.out
+
+# --- Tests for list_local_datasets (similar to original test_core.py) ---
