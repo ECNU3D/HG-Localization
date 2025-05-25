@@ -56,7 +56,7 @@ This allows a user with internet and S3 access to download public datasets (e.g.
 ### Installation Steps
 1.  Clone the repository (or obtain the source code):
     ```bash
-    git clone https://github.com/yourusername/hg-localization.git # Replace with your actual repo URL
+    git clone https://github.com/ECNU3D/hg-localization.git # Replace with your actual repo URL
     cd hg-localization
     ```
 2.  Create and activate a virtual environment (recommended):

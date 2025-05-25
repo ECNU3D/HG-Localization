@@ -18,5 +18,5 @@ setup(
     description="A Python library to localize Hugging Face datasets.",
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
-    url="https://github.com/yourusername/hg-localization", # Replace with your repo URL
+    url="https://github.com/ECNU3D/hg-localization", # Replace with your repo URL
 ) 

@@ -87,7 +87,13 @@ def get_dataset_card_content(dataset_id: str, revision: Optional[str] = None) ->
     """Fetches the Markdown content of a dataset card from the Hugging Face Hub."""
     try:
         print(f"Attempting to load dataset card for: {dataset_id} (revision: {revision or 'main'})")
-        card = ModelCard.load(dataset_id, repo_type="dataset", revision=revision) # Pass revision to ModelCard.load
+        # Try with revision first, fall back to without revision if not supported
+        try:
+            card = ModelCard.load(dataset_id, repo_type="dataset", revision=revision)
+        except TypeError:
+            # revision parameter not supported in this version of huggingface_hub
+            print(f"Revision parameter not supported, loading default version for {dataset_id}")
+            card = ModelCard.load(dataset_id, repo_type="dataset")
         return card.text
     except Exception as e:
         print(f"Error loading dataset card for '{dataset_id}' (revision: {revision or 'main'}): {e}")

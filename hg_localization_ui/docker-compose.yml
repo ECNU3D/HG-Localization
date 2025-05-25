@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: hg_localization_ui/Dockerfile.backend
+    container_name: hg-localization-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - HGLOC_S3_BUCKET_NAME=${HGLOC_S3_BUCKET_NAME:-}
+      - HGLOC_S3_ENDPOINT_URL=${HGLOC_S3_ENDPOINT_URL:-}
+      - HGLOC_AWS_ACCESS_KEY_ID=${HGLOC_AWS_ACCESS_KEY_ID:-}
+      - HGLOC_AWS_SECRET_ACCESS_KEY=${HGLOC_AWS_SECRET_ACCESS_KEY:-}
+      - HGLOC_S3_DATA_PREFIX=${HGLOC_S3_DATA_PREFIX:-}
+      - HGLOC_AWS_DEFAULT_REGION=${HGLOC_AWS_DEFAULT_REGION:-us-east-1}
+    volumes:
+      - datasets_store:/app/datasets_store
+      - ./backend/logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: hg-localization-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  datasets_store:
+    driver: local
+
+networks:
+  default:
+    name: hg-localization-network 
