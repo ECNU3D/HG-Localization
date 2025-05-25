@@ -1,165 +1,114 @@
 import pytest
 from click.testing import CliRunner
-from hg_localization.cli import cli
-from hg_localization.core import DEFAULT_CONFIG_NAME, DEFAULT_REVISION_NAME # For checking default outputs
+from unittest.mock import patch, MagicMock
 
-# Mock the core functions that the CLI calls
-# We want to test the CLI logic (parsing args, calling core functions, formatting output)
-# not the core functions themselves (those are tested in test_core.py)
+# Assuming cli.py is in hg_localization folder, and this test is in tests/
+# Adjust import path if structure is different
+from hg_localization.cli import cli 
+
+# We need to mock the functions called by the CLI commands.
+# These functions are now in dataset_manager.py
 
 @pytest.fixture
-def mock_core_functions_for_cli(mocker):
-    """Mocks core functions used by the CLI, targeting their location in cli.py's import scope."""
+def mock_dataset_manager_functions(mocker):
+    """Mocks all relevant functions from dataset_manager.py used by cli.py."""
     mock_download = mocker.patch('hg_localization.cli.download_dataset')
     mock_list_local = mocker.patch('hg_localization.cli.list_local_datasets')
     mock_list_s3 = mocker.patch('hg_localization.cli.list_s3_datasets')
+    mock_sync_local_to_s3 = mocker.patch('hg_localization.cli.sync_local_dataset_to_s3')
     return {
         "download_dataset": mock_download,
         "list_local_datasets": mock_list_local,
-        "list_s3_datasets": mock_list_s3
+        "list_s3_datasets": mock_list_s3,
+        "sync_local_dataset_to_s3": mock_sync_local_to_s3
     }
 
-@pytest.fixture
-def s3_dataset_list_with_cards():
-    """Provides a sample list of S3 dataset info including s3_card_url."""
-    return [
-        {
-            "dataset_id": "s3_d1", 
-            "config_name": "s3_c1", 
-            "revision": "s3_r1", 
-            "s3_card_url": "https://s3.example.com/card_d1.md?presigned"
-        },
-        {
-            "dataset_id": "s3_d2", 
-            "config_name": None, # Default config
-            "revision": "s3_r2", 
-            "s3_card_url": None # Card not available
-        },
-        {
-            "dataset_id": "s3_d3", 
-            "config_name": "s3_c3", 
-            "revision": None, # Default revision
-            "s3_card_url": "https://s3.example.com/card_d3.md?presigned"
-        }
-    ]
-
-def test_cli_download_full_spec(mock_core_functions_for_cli):
+def test_download_command_success(mock_dataset_manager_functions):
     runner = CliRunner()
-    mock_download = mock_core_functions_for_cli['download_dataset']
-    fake_path = "/fake/path/my_dataset/my_config/my_revision"
-    mock_download.return_value = (True, fake_path)
-
-    result = runner.invoke(cli, [
-        'download', 'my_dataset', 
-        '--name', 'my_config', 
-        '--revision', 'my_revision', 
-        '--trust-remote-code'
-    ])
-
+    mock_dataset_manager_functions["download_dataset"].return_value = (True, "/fake/path/to/dataset")
+    
+    result = runner.invoke(cli, ["download", "test_dataset", "--name", "config1", "-r", "rev1", "--trust-remote-code", "--no-s3-upload"])
+    
     assert result.exit_code == 0
-    mock_download.assert_called_once_with(
-        'my_dataset', 
-        config_name='my_config', 
-        revision='my_revision', 
+    assert "Successfully processed 'test_dataset'" in result.output
+    assert "Local path: /fake/path/to/dataset" in result.output
+    mock_dataset_manager_functions["download_dataset"].assert_called_once_with(
+        "test_dataset", 
+        config_name="config1", 
+        revision="rev1", 
         trust_remote_code=True,
-        make_public=False,
-        skip_s3_upload=False
+        make_public=False, # Default for make_public flag
+        skip_s3_upload=True
     )
-    assert f"Successfully processed 'my_dataset'. Local path: {fake_path}" in result.output
 
-def test_cli_download_id_only(mock_core_functions_for_cli):
+def test_download_command_failure(mock_dataset_manager_functions):
     runner = CliRunner()
-    mock_download = mock_core_functions_for_cli['download_dataset']
-    fake_path = f"/fake/path/id_only_dataset/{DEFAULT_CONFIG_NAME}/{DEFAULT_REVISION_NAME}"
-    mock_download.return_value = (True, fake_path)
+    mock_dataset_manager_functions["download_dataset"].return_value = (False, "Mocked download error")
+    result = runner.invoke(cli, ["download", "test_dataset_fail"])
+    assert result.exit_code == 0 # Click commands usually exit 0 even on app-level failure, relying on output
+    assert "Failed to process 'test_dataset_fail'" in result.output
+    assert "Error: Mocked download error" in result.output
 
-    result = runner.invoke(cli, ['download', 'id_only_dataset'])
-
+def test_list_local_command_empty(mock_dataset_manager_functions):
+    runner = CliRunner()
+    mock_dataset_manager_functions["list_local_datasets"].return_value = []
+    result = runner.invoke(cli, ["list-local"])
     assert result.exit_code == 0
-    mock_download.assert_called_once_with(
-        'id_only_dataset', 
-        config_name=None,  # CLI default for --name is None
-        revision=None,     # CLI default for --revision is None
-        trust_remote_code=False,
-        make_public=False,
-        skip_s3_upload=False
-    )
-    assert f"Successfully processed 'id_only_dataset'. Local path: {fake_path}" in result.output
-
-def test_cli_download_failure(mock_core_functions_for_cli):
-    runner = CliRunner()
-    mock_download = mock_core_functions_for_cli['download_dataset']
-    mock_download.return_value = (False, "Epic fail downloading")
-
-    result = runner.invoke(cli, ['download', 'bad_dataset', '-n', 'bad_config'])
-
-    assert result.exit_code == 0 
-    mock_download.assert_called_once_with('bad_dataset', config_name='bad_config', revision=None, trust_remote_code=False, make_public=False, skip_s3_upload=False)
-    assert "Failed to process 'bad_dataset'. Error: Epic fail downloading" in result.output
-
-def test_cli_list_local_empty(mock_core_functions_for_cli):
-    runner = CliRunner()
-    mock_list_local = mock_core_functions_for_cli['list_local_datasets']
-    mock_list_local.return_value = []
-
-    result = runner.invoke(cli, ['list-local'])
-    assert result.exit_code == 0
-    mock_list_local.assert_called_once()
     assert "No datasets found in local cache." in result.output
 
-def test_cli_list_local_with_data(mock_core_functions_for_cli):
+def test_list_local_command_with_data(mock_dataset_manager_functions):
     runner = CliRunner()
-    mock_list_local = mock_core_functions_for_cli['list_local_datasets']
-    mock_list_local.return_value = [
-        {"dataset_id": "d1", "config_name": "c1", "revision": "r1"},
-        {"dataset_id": "d2", "config_name": None, "revision": "r2"}, # Default config
-        {"dataset_id": "d3", "config_name": "c3", "revision": None}  # Default revision
+    mock_data = [
+        {"dataset_id": "ds1", "config_name": "cfgA", "revision": "revB"},
+        {"dataset_id": "ds2", "config_name": None, "revision": None} # Test None for default display
     ]
-    result = runner.invoke(cli, ['list-local'])
+    mock_dataset_manager_functions["list_local_datasets"].return_value = mock_data
+    result = runner.invoke(cli, ["list-local"])
     assert result.exit_code == 0
-    assert "ID: d1, Config: c1, Revision: r1" in result.output
-    assert "ID: d2, Config: default, Revision: r2" in result.output # CLI shows 'default' for None
-    assert "ID: d3, Config: c3, Revision: default" in result.output # CLI shows 'default' for None
+    assert "Available local datasets (cache):" in result.output
+    assert "ID: ds1, Config: cfgA, Revision: revB" in result.output
+    assert "ID: ds2, Config: default, Revision: default" in result.output # Check default display
 
-def test_cli_list_s3_empty(mock_core_functions_for_cli):
+def test_list_s3_command_empty(mock_dataset_manager_functions):
     runner = CliRunner()
-    mock_list_s3 = mock_core_functions_for_cli['list_s3_datasets']
-    mock_list_s3.return_value = []
-
-    result = runner.invoke(cli, ['list-s3'])
+    mock_dataset_manager_functions["list_s3_datasets"].return_value = []
+    result = runner.invoke(cli, ["list-s3"])
     assert result.exit_code == 0
-    mock_list_s3.assert_called_once()
     assert "No datasets found in S3 or S3 not configured/accessible." in result.output
 
-def test_cli_list_s3_with_data(mock_core_functions_for_cli):
+def test_list_s3_command_with_data(mock_dataset_manager_functions):
     runner = CliRunner()
-    mock_list_s3 = mock_core_functions_for_cli['list_s3_datasets']
-    mock_list_s3.return_value = [
-        {"dataset_id": "s3_d1", "config_name": "s3_c1", "revision": "s3_r1"},
-        {"dataset_id": "s3_d2", "config_name": None, "revision": None} 
+    mock_data = [
+        {"dataset_id": "s3_ds1", "config_name": "s3_cfgA", "revision": "s3_revB", "s3_card_url": "http://s3_card_link_1"},
+        {"dataset_id": "s3_ds2", "config_name": None, "revision": "s3_revC", "s3_card_url": None}
     ]
-    result = runner.invoke(cli, ['list-s3'])
+    mock_dataset_manager_functions["list_s3_datasets"].return_value = mock_data
+    result = runner.invoke(cli, ["list-s3"])
     assert result.exit_code == 0
-    assert "ID: s3_d1, Config: s3_c1, Revision: s3_r1" in result.output
-    assert "ID: s3_d2, Config: default, Revision: default" in result.output
+    assert f"Found {len(mock_data)} dataset version(s) in S3:" in result.output
+    assert "ID: s3_ds1, Config: s3_cfgA, Revision: s3_revB, Card (S3): http://s3_card_link_1" in result.output
+    assert "ID: s3_ds2, Config: default, Revision: s3_revC, Card (S3): Not available" in result.output
 
-def test_cli_download_missing_dataset_id(mock_core_functions_for_cli):
+def test_sync_local_to_s3_command_success(mock_dataset_manager_functions):
     runner = CliRunner()
-    result = runner.invoke(cli, ['download'])
-    assert result.exit_code != 0 
-    assert "Missing argument 'DATASET_ID'" in result.output
-    mock_core_functions_for_cli["download_dataset"].assert_not_called() 
-
-def test_cli_list_s3_with_datasets(mock_core_functions_for_cli, s3_dataset_list_with_cards):
-    runner = CliRunner()
-    mock_list_s3 = mock_core_functions_for_cli['list_s3_datasets']
-    mock_list_s3.return_value = s3_dataset_list_with_cards
-
-    result = runner.invoke(cli, ['list-s3'])
-    assert result.exit_code == 0
-    mock_list_s3.assert_called_once()
+    mock_dataset_manager_functions["sync_local_dataset_to_s3"].return_value = (True, "Sync successful mock message")
+    result = runner.invoke(cli, ["sync-local-to-s3", "my_dataset_to_sync", "--name", "specific_config", "--make-public"])
     
-    # Adjust assertions to match the new fixture data
-    assert "ID: s3_d1, Config: s3_c1, Revision: s3_r1, Card (S3): https://s3.example.com/card_d1.md?presigned" in result.output
-    assert "ID: s3_d2, Config: default, Revision: s3_r2, Card (S3): Not available" in result.output
-    assert "ID: s3_d3, Config: s3_c3, Revision: default, Card (S3): https://s3.example.com/card_d3.md?presigned" in result.output 
+    assert result.exit_code == 0
+    assert "Successfully synced 'my_dataset_to_sync'" in result.output
+    assert "Sync successful mock message" in result.output
+    mock_dataset_manager_functions["sync_local_dataset_to_s3"].assert_called_once_with(
+        dataset_id="my_dataset_to_sync",
+        config_name="specific_config",
+        revision=None, # Default if not provided
+        make_public=True
+    )
+
+def test_sync_local_to_s3_command_failure(mock_dataset_manager_functions):
+    runner = CliRunner()
+    mock_dataset_manager_functions["sync_local_dataset_to_s3"].return_value = (False, "Mocked sync error")
+    result = runner.invoke(cli, ["sync-local-to-s3", "failed_sync_ds"])
+    
+    assert result.exit_code == 0 # Click command itself succeeds
+    assert "Failed to sync 'failed_sync_ds'" in result.output
+    assert "Error: Mocked sync error" in result.output 

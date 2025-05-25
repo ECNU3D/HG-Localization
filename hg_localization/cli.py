@@ -1,5 +1,12 @@
 import click
-from .core import download_dataset, list_local_datasets, list_s3_datasets
+from .dataset_manager import (
+    download_dataset, 
+    list_local_datasets, 
+    list_s3_datasets,
+    sync_local_dataset_to_s3 # Ensure this is imported if used by a command
+)
+# config might be imported if CLI needs direct access to config values, but usually not.
+# from .config import S3_BUCKET_NAME # Example, if needed
 
 @click.group()
 def cli():
@@ -41,13 +48,13 @@ def list_local_cmd():
     click.secho("Available local datasets (cache):", bold=True)
     for ds_info in datasets:
         ds_id = ds_info.get('dataset_id', 'N/A')
-        cfg_name = ds_info.get('config_name') or 'default'
-        rev = ds_info.get('revision') or 'default'
+        cfg_name = ds_info.get('config_name') or 'default' # Display 'default' if None
+        rev = ds_info.get('revision') or 'default'      # Display 'default' if None
         click.echo(f"  - ID: {click.style(ds_id, fg='blue')}, Config: {click.style(cfg_name, fg='green')}, Revision: {click.style(rev, fg='yellow')}")
 
 @cli.command("list-s3")
 def list_s3_command():
-    "Lists datasets available in the configured S3 bucket."
+    """Lists datasets available in the configured S3 bucket."""
     click.echo("Listing datasets from S3...")
     s3_datasets = list_s3_datasets()
     if not s3_datasets:
@@ -59,9 +66,8 @@ def list_s3_command():
         ds_id = ds_info.get('dataset_id', 'N/A')
         conf_name = ds_info.get('config_name') or "default"
         rev = ds_info.get('revision') or "default"
-        s3_card_link = ds_info.get('s3_card_url') # Get the S3 card link
+        s3_card_link = ds_info.get('s3_card_url')
 
-        # Prepare output string
         output = f"  - ID: {ds_id}, Config: {conf_name}, Revision: {rev}"
         if s3_card_link:
             output += f", Card (S3): {s3_card_link}"
@@ -71,14 +77,13 @@ def list_s3_command():
 
 @cli.command("sync-local-to-s3")
 @click.argument('dataset_id')
-@click.option('--name', '-n', default=None, help='The specific dataset configuration name (e.g., "mrpc" for glue). Optional.')
+@click.option('--name', '-n', default=None, help='The specific dataset configuration name. Optional.')
 @click.option('--revision', '-r', default=None, help='The git revision of the dataset. Optional.')
 @click.option('--make-public', is_flag=True, help="Zip and upload the dataset to a public S3 location, and update public_datasets.json.")
 def sync_local_to_s3_cmd(dataset_id: str, name: str | None, revision: str | None, make_public: bool):
     """Syncs a specific local dataset to S3. Uploads if not present; can also make public."""
     click.echo(f"Attempting to sync local dataset to S3: {dataset_id} (Config: {name or 'default'}, Revision: {revision or 'default'}, Make public: {make_public})")
-    click.echo("Note: Requires S3 env vars (HGLOC_S3_BUCKET_NAME, etc.) for S3 operations.")
-    from .core import sync_local_dataset_to_s3 # Import here
+    # Note: sync_local_dataset_to_s3 is now directly imported from dataset_manager
     success, message = sync_local_dataset_to_s3(
         dataset_id=dataset_id, 
         config_name=name, 
