@@ -426,15 +426,28 @@ def list_local_datasets() -> List[Dict[str, str]]:
                             dataset_id_display = dataset_id_dir.name # This is the "safe" name from path
                             config_name_display = config_name_dir.name
                             revision_display = revision_dir.name
+                            
+                            has_card = (revision_dir / "dataset_card.md").is_file()
                             # Here, we might want to map back from safe names to original names if possible,
                             # but listing uses the stored (safe) names.
                             available_datasets.append({
                                 "dataset_id": dataset_id_display,
                                 "config_name": config_name_display if config_name_display != DEFAULT_CONFIG_NAME else None,
-                                "revision": revision_display if revision_display != DEFAULT_REVISION_NAME else None
+                                "revision": revision_display if revision_display != DEFAULT_REVISION_NAME else None,
+                                "path": str(revision_dir),
+                                "has_card": has_card
                             })
     if not available_datasets:
         print("No local datasets found in cache.")
+    else:
+        print(f"Found {len(available_datasets)} local dataset(s):")
+        for ds_info in available_datasets:
+            # Reinstating detailed print for test compatibility
+            print(f"  Dataset ID: {ds_info['dataset_id']}, "
+                  f"Config: {ds_info.get('config_name', DEFAULT_CONFIG_NAME)}, "
+                  f"Revision: {ds_info.get('revision', DEFAULT_REVISION_NAME)}, "
+                  f"Path: {ds_info['path']}, "
+                  f"Card: {'Yes' if ds_info['has_card'] else 'No'}")
     return available_datasets
 
 def list_s3_datasets() -> List[Dict[str, str]]:
