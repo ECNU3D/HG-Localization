@@ -1,0 +1,148 @@
+<mxfile host="65bd71144e">
+    <diagram name="HG-Localization Architecture" id="architecture">
+        <mxGraphModel dx="2198" dy="926" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="HG-Localization: Dataset Management Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="527" y="20" width="600" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="personas-title" value="User Personas" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="290" y="330" width="150" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="ds-lead" value="Data Science Lead&#xa;&#xa;• Has internet access&#xa;• Has S3 write credentials&#xa;• Downloads from HuggingFace&#xa;• Manages public/private datasets&#xa;• Uses CLI tools" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="290" y="370" width="200" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="ds-individual" value="Individual Data Scientists&#xa;&#xa;• Limited/No internet access&#xa;• May have S3 read credentials&#xa;• Downloads from S3 cache&#xa;• Uploads proprietary datasets&#xa;• Uses CLI tools" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="290" y="510" width="200" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="general-users" value="General Users&#xa;&#xa;• Web UI access only&#xa;• Browse datasets&#xa;• Download datasets&#xa;• Cannot upload via UI&#xa;• Read-only access" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="290" y="650" width="200" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="external-title" value="External Data Sources" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="330" width="200" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="hf-hub" value="HuggingFace Hub&#xa;&#xa;• Public datasets&#xa;• Model repositories&#xa;• Requires internet access&#xa;• Source of truth for public data" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="370" width="200" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="core-title" value="Core Components" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="330" width="200" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="cli-tools" value="CLI Tools (hg-localize)&#xa;&#xa;Commands:&#xa;• download - Get datasets&#xa;• list-local - Show cached&#xa;• list-s3 - Show remote&#xa;• sync-local-to-s3 - Upload&#xa;&#xa;Features:&#xa;• --make-public flag&#xa;• S3 integration&#xa;• Local caching" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="370" width="200" height="210" as="geometry"/>
+                </mxCell>
+                <mxCell id="python-api" value="Python API&#xa;&#xa;Functions:&#xa;• download_dataset()&#xa;• load_local_dataset()&#xa;• list_local_datasets()&#xa;• list_s3_datasets()&#xa;&#xa;Programmatic access&#xa;for automation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="677" y="620" width="200" height="180" as="geometry"/>
+                </mxCell>
+                <mxCell id="web-ui" value="Web UI (Centralized)&#xa;&#xa;• Browse datasets&#xa;• Download datasets&#xa;• Read-only interface&#xa;• No upload capability&#xa;• Connects to multiple S3 buckets&#xa;• Centrally hosted" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="860" width="200" height="150" as="geometry"/>
+                </mxCell>
+                <mxCell id="storage-title" value="Storage Layer" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="980" y="330" width="200" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="local-cache" value="Local Cache&#xa;(datasets_store/)&#xa;&#xa;Structure:&#xa;dataset_id/config_name/revision/&#xa;&#xa;• Fast access&#xa;• Offline capability&#xa;• Hierarchical organization" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="980" y="370" width="200" height="170" as="geometry"/>
+                </mxCell>
+                <mxCell id="team-s3" value="Team S3 Buckets&#xa;(Distributed)&#xa;&#xa;Private Storage:&#xa;• Team datasets&#xa;• Access controlled&#xa;• Same path structure&#xa;&#xa;Public Storage:&#xa;• public_datasets.json&#xa;• ZIP archives&#xa;• Public read access" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="980" y="570" width="200" height="210" as="geometry"/>
+                </mxCell>
+                <mxCell id="other-s3" value="Other Team S3 Buckets&#xa;&#xa;• Distributed architecture&#xa;• Each team manages own bucket&#xa;• Web UI can connect to multiple&#xa;• Independent access control" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="977" y="800" width="200" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow1" value="" style="endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="ds-lead" target="hf-hub" edge="1">
+                    <mxGeometry width="50" height="50" relative="1" as="geometry">
+                        <mxPoint x="540" y="560" as="sourcePoint"/>
+                        <mxPoint x="590" y="510" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow1-label" value="Download&#xa;datasets" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="220" y="390" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow2" value="" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.7;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" parent="1" source="ds-lead" target="cli-tools" edge="1">
+                    <mxGeometry width="50" height="50" relative="1" as="geometry">
+                        <mxPoint x="330" y="560" as="sourcePoint"/>
+                        <mxPoint x="380" y="510" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow2-label" value="Uses CLI&#xa;tools" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="120" y="430" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow3" value="" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.7;entryDx=0;entryDy=0;" parent="1" source="ds-individual" target="cli-tools" edge="1">
+                    <mxGeometry width="50" height="50" relative="1" as="geometry">
+                        <mxPoint x="330" y="660" as="sourcePoint"/>
+                        <mxPoint x="380" y="610" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow3-label" value="Uses CLI&#xa;tools" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="560" y="490" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow4" value="" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="general-users" target="web-ui" edge="1">
+                    <mxGeometry width="50" height="50" relative="1" as="geometry">
+                        <mxPoint x="330" y="760" as="sourcePoint"/>
+                        <mxPoint x="380" y="710" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow4-label" value="Browse &amp;&#xa;Download" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="560" y="700" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow5" value="" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="cli-tools" target="local-cache" edge="1">
+                    <mxGeometry width="50" height="50" relative="1" as="geometry">
+                        <mxPoint x="930" y="460" as="sourcePoint"/>
+                        <mxPoint x="980" y="410" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow5-label" value="Cache&#xa;locally" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="900" y="400" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow6" value="" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.7;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" parent="1" source="cli-tools" target="team-s3" edge="1">
+                    <mxGeometry width="50" height="50" relative="1" as="geometry">
+                        <mxPoint x="930" y="560" as="sourcePoint"/>
+                        <mxPoint x="980" y="510" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow6-label" value="Upload to&#xa;S3 bucket" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="910" y="540" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow7" value="" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0;" parent="1" source="web-ui" target="team-s3" edge="1">
+                    <mxGeometry width="50" height="50" relative="1" as="geometry">
+                        <mxPoint x="930" y="660" as="sourcePoint"/>
+                        <mxPoint x="980" y="610" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow7-label" value="Browse&#xa;datasets" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="900" y="585" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="arrow8" value="" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.7;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="web-ui" target="other-s3" edge="1">
+                    <mxGeometry width="50" height="50" relative="1" as="geometry">
+                        <mxPoint x="930" y="760" as="sourcePoint"/>
+                        <mxPoint x="980" y="710" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arrow8-label" value="Multi-bucket&#xa;access" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="900" y="760" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="scenarios-title" value="Key Usage Scenarios" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="727" y="80" width="200" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="scenario1" value="1. Private Team Sharing&#xa;&#xa;• Data Science Lead downloads from HuggingFace&#xa;• Uploads to shared S3 bucket (private)&#xa;• Team members access via CLI from S3&#xa;• Enables offline work in restricted environments" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="357" y="120" width="300" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="scenario2" value="2. Public Dataset Sharing&#xa;&#xa;• Use --make-public flag to create ZIP archives&#xa;• Upload to public S3 prefix with read-only access&#xa;• Update public_datasets.json manifest&#xa;• External teams can download without credentials" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="677" y="120" width="300" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="scenario3" value="3. Centralized Web Access&#xa;&#xa;• Web UI hosted centrally&#xa;• Connects to multiple distributed S3 buckets&#xa;• Users browse and download datasets&#xa;• Read-only interface for security&#xa;• No upload capability via web" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="997" y="120" width="300" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="benefits-title" value="Architecture Benefits" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="1230" y="330" width="200" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="benefits" value="✓ Distributed S3 Storage&#xa;   Each team manages own bucket&#xa;&#xa;✓ Centralized Web UI&#xa;   Single interface for multiple buckets&#xa;&#xa;✓ Offline Capability&#xa;   Local caching for restricted environments&#xa;&#xa;✓ Flexible Access Control&#xa;   Private team sharing + public distribution&#xa;&#xa;✓ Version Management&#xa;   Git-like revision tracking&#xa;&#xa;✓ Multiple Interfaces&#xa;   CLI for power users, Web UI for browsing&#xa;&#xa;✓ Bandwidth Efficiency&#xa;   ZIP archives for public distribution" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0f0f0;strokeColor=#666666;align=left;verticalAlign=top;spacingLeft=10;spacingTop=10;" parent="1" vertex="1">
+                    <mxGeometry x="1230" y="370" width="300" height="330" as="geometry"/>
+                </mxCell>
+                <mxCell id="3" value="Uses CLI&#xa;tools" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;" vertex="1" parent="1">
+                    <mxGeometry x="560" y="400" width="60" height="30" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

@@ -1,15 +1,224 @@
 import React, { useState } from 'react';
 import { useParams, useSearchParams, Link } from 'react-router-dom';
-import { ArrowLeft, Eye, FileText, Code, Download, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Eye, FileText, Code, Download, ExternalLink, ChevronDown, ChevronRight, Copy, Check } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import Editor from '@monaco-editor/react';
 import { 
   useDatasetPreview, 
   useDatasetCard, 
   useDatasetExamples,
-  useCacheDataset,
   useDownloadDatasetZip 
 } from '../hooks/useDatasets';
+
+// Copy button component
+const CopyButton: React.FC<{ text: string; className?: string }> = ({ text, className = "" }) => {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000); // Reset after 2 seconds
+    } catch (err) {
+      console.error('Failed to copy text: ', err);
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      className={`flex items-center space-x-1 px-2 py-1 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded transition-colors ${className}`}
+      title={copied ? "Copied!" : "Copy code"}
+    >
+      {copied ? (
+        <>
+          <Check className="w-4 h-4 text-green-600" />
+          <span className="text-green-600">Copied!</span>
+        </>
+      ) : (
+        <>
+          <Copy className="w-4 h-4" />
+          <span>Copy</span>
+        </>
+      )}
+    </button>
+  );
+};
+
+// Simple JSON syntax highlighter
+const JsonHighlighter: React.FC<{ json: string }> = ({ json }) => {
+  const highlightJson = (jsonStr: string) => {
+    return jsonStr
+      .replace(/"([^"]+)":/g, '<span class="json-key">"$1":</span>')
+      .replace(/"([^"]*)"(?=\s*[,\]}])/g, '<span class="json-string">"$1"</span>')
+      .replace(/:\s*(-?\d+\.?\d*)/g, ': <span class="json-number">$1</span>')
+      .replace(/:\s*(true|false)/g, ': <span class="json-boolean">$1</span>')
+      .replace(/:\s*null/g, ': <span class="json-null">null</span>');
+  };
+
+  return (
+    <pre 
+      className="json-pre font-mono text-xs whitespace-pre-wrap"
+      dangerouslySetInnerHTML={{ __html: highlightJson(json) }}
+    />
+  );
+};
+
+// Cell Renderer Component for table data
+const CellRenderer: React.FC<{ value: any }> = ({ value }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  
+  if (value === null || value === undefined) {
+    return <span className="text-gray-400 italic">null</span>;
+  }
+  
+  if (typeof value !== 'object') {
+    const stringValue = String(value);
+    if (stringValue.length > 100) {
+      return (
+        <div className="space-y-1">
+          <div className="max-w-xs">
+            {isExpanded ? stringValue : `${stringValue.substring(0, 100)}...`}
+          </div>
+          <button
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="text-xs text-blue-600 hover:text-blue-800"
+          >
+            {isExpanded ? 'Show less' : 'Show more'}
+          </button>
+        </div>
+      );
+    }
+    return <span className="max-w-xs break-words">{stringValue}</span>;
+  }
+  
+  const jsonString = JSON.stringify(value, null, 2);
+  const isComplex = jsonString.length > 50;
+  
+  if (!isComplex) {
+    return <span className="font-mono text-xs">{jsonString}</span>;
+  }
+  
+  return (
+    <div className="space-y-1">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center space-x-1 text-blue-600 hover:text-blue-800 text-xs"
+      >
+        {isExpanded ? (
+          <ChevronDown className="w-3 h-3" />
+        ) : (
+          <ChevronRight className="w-3 h-3" />
+        )}
+        <span>
+          {Array.isArray(value) ? `Array (${value.length})` : `Object (${Object.keys(value).length})`}
+        </span>
+      </button>
+      
+      {isExpanded && (
+        <div className="max-h-32 overflow-auto">
+          <JsonHighlighter json={jsonString} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+// JSON Viewer Component for better feature display
+const JsonViewer: React.FC<{ data: any; name: string }> = ({ data, name }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  
+  if (typeof data !== 'object' || data === null) {
+    return (
+      <div className="flex justify-between items-center">
+        <span className="text-gray-600 truncate">{name}:</span>
+        <span className="font-mono text-sm text-gray-800 ml-2">
+          {String(data)}
+        </span>
+      </div>
+    );
+  }
+
+  const jsonString = JSON.stringify(data, null, 2);
+  const isComplex = jsonString.length > 50 || jsonString.includes('\n');
+
+  if (!isComplex) {
+    return (
+      <div className="flex justify-between items-center">
+        <span className="text-gray-600 truncate">{name}:</span>
+        <span className="font-mono text-sm text-gray-800 ml-2">
+          {jsonString}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center space-x-1 text-gray-600 hover:text-gray-800 transition-colors"
+      >
+        {isExpanded ? (
+          <ChevronDown className="w-4 h-4" />
+        ) : (
+          <ChevronRight className="w-4 h-4" />
+        )}
+        <span className="truncate">{name}:</span>
+        {!isExpanded && (
+          <span className="font-mono text-xs text-gray-500 ml-2">
+            {Object.keys(data).length} properties
+          </span>
+        )}
+      </button>
+      
+      {isExpanded && (
+        <div className="ml-4 border border-gray-200 rounded-lg overflow-hidden">
+          <Editor
+            height="120px"
+            language="json"
+            value={jsonString}
+            options={{
+              readOnly: true,
+              minimap: { enabled: false },
+              scrollBeyondLastLine: false,
+              fontSize: 12,
+              lineNumbers: 'off',
+              theme: 'vs-light',
+              wordWrap: 'on',
+              folding: false,
+              glyphMargin: false,
+              lineDecorationsWidth: 0,
+              lineNumbersMinChars: 0,
+              automaticLayout: true,
+              scrollbar: {
+                vertical: 'auto',
+                horizontal: 'auto',
+                verticalScrollbarSize: 8,
+                horizontalScrollbarSize: 8,
+              },
+            }}
+            onMount={(editor) => {
+              // Force layout after a short delay to prevent ResizeObserver errors
+              setTimeout(() => {
+                editor.layout();
+              }, 100);
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const DatasetDetailPage: React.FC = () => {
   const { datasetId } = useParams<{ datasetId: string }>();
@@ -19,9 +228,7 @@ export const DatasetDetailPage: React.FC = () => {
   
   const [activeTab, setActiveTab] = useState<'preview' | 'card' | 'examples'>('preview');
   
-  const cacheMutation = useCacheDataset();
   const downloadZipMutation = useDownloadDatasetZip();
-  const [isCaching, setIsCaching] = useState(false);
 
   const { 
     data: preview, 
@@ -39,25 +246,6 @@ export const DatasetDetailPage: React.FC = () => {
     data: examples, 
     isLoading: examplesLoading 
   } = useDatasetExamples(datasetId!, configName, revision, activeTab === 'examples');
-
-  const handleCache = async () => {
-    if (!datasetId) return;
-    
-    setIsCaching(true);
-    try {
-      await cacheMutation.mutateAsync({
-        dataset_id: datasetId,
-        config_name: configName,
-        revision: revision,
-        trust_remote_code: false,
-        make_public: false,
-      });
-    } catch (error) {
-      console.error('Cache failed:', error);
-    } finally {
-      setIsCaching(false);
-    }
-  };
 
   const handleDownload = async () => {
     if (!datasetId) return;
@@ -119,7 +307,7 @@ export const DatasetDetailPage: React.FC = () => {
 
         <div className="flex items-center space-x-3">
           <a
-            href={`https://huggingface.co/datasets/${datasetId}`}
+            href={`https://huggingface.co/datasets/${datasetId.replace(/_/g, '/')}`}
             target="_blank"
             rel="noopener noreferrer"
             className="btn-outline flex items-center space-x-2"
@@ -205,12 +393,7 @@ export const DatasetDetailPage: React.FC = () => {
                       <h3 className="font-medium text-gray-700 mb-2">Features</h3>
                       <div className="space-y-1">
                         {Object.entries(preview.features).map(([name, type]) => (
-                          <div key={name} className="flex justify-between">
-                            <span className="text-gray-600 truncate">{name}:</span>
-                            <span className="font-mono text-sm text-gray-800 ml-2">
-                              {typeof type === 'object' ? JSON.stringify(type) : String(type)}
-                            </span>
-                          </div>
+                          <JsonViewer key={name} data={type} name={name} />
                         ))}
                       </div>
                     </div>
@@ -240,13 +423,9 @@ export const DatasetDetailPage: React.FC = () => {
                             {Object.keys(preview.features).map((feature) => (
                               <td
                                 key={feature}
-                                className="px-6 py-4 whitespace-nowrap text-sm text-gray-900"
+                                className="px-6 py-4 text-sm text-gray-900"
                               >
-                                <div className="max-w-xs truncate">
-                                  {typeof row[feature] === 'object' 
-                                    ? JSON.stringify(row[feature])
-                                    : String(row[feature] || '')}
-                                </div>
+                                <CellRenderer value={row[feature]} />
                               </td>
                             ))}
                           </tr>
@@ -303,9 +482,10 @@ export const DatasetDetailPage: React.FC = () => {
                       <h3 className="text-lg font-semibold text-gray-900">{example.title}</h3>
                       <p className="text-gray-600">{example.description}</p>
                     </div>
+                    <CopyButton text={example.code} />
                   </div>
                   
-                  <div className="border border-gray-200 rounded-lg overflow-hidden">
+                  <div className="border border-gray-200 rounded-lg overflow-hidden relative">
                     <Editor
                       height="200px"
                       language={example.language}
@@ -319,6 +499,13 @@ export const DatasetDetailPage: React.FC = () => {
                         theme: 'vs-light',
                       }}
                     />
+                    {/* Additional copy button in the top-right corner of the code editor */}
+                    <div className="absolute top-2 right-2">
+                      <CopyButton 
+                        text={example.code} 
+                        className="bg-white/90 backdrop-blur-sm border border-gray-200 shadow-sm"
+                      />
+                    </div>
                   </div>
                 </div>
               ))

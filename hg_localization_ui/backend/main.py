@@ -419,6 +419,9 @@ async def get_dataset_examples(
     """Get code examples for using the dataset"""
     examples = []
     
+    # Convert dataset_id back to original format for Hugging Face operations
+    original_dataset_id = dataset_id.replace('_', '/')
+    
     # Basic loading example
     config_part = f", name='{config_name}'" if config_name else ""
     revision_part = f", revision='{revision}'" if revision else ""
@@ -427,7 +430,7 @@ async def get_dataset_examples(
 
 # Load the dataset from local cache
 dataset = load_local_dataset(
-    dataset_id='{dataset_id}'{config_part}{revision_part}
+    dataset_id='{original_dataset_id}'{config_part}{revision_part}
 )
 
 if dataset:
@@ -447,7 +450,7 @@ else:
 
 # Download dataset from Hugging Face and cache locally
 success, path = download_dataset(
-    dataset_id='{dataset_id}'{config_part}{revision_part},
+    dataset_id='{original_dataset_id}'{config_part}{revision_part},
     trust_remote_code=False
 )
 
@@ -466,7 +469,7 @@ else:
     hf_code = f"""from datasets import load_dataset
 
 # Load directly from Hugging Face Hub
-dataset = load_dataset('{dataset_id}'{config_part}{revision_part})
+dataset = load_dataset('{original_dataset_id}'{config_part}{revision_part})
 
 # Access different splits
 train_data = dataset['train']
@@ -476,6 +479,147 @@ print(f"Training samples: {{len(train_data)}}")"""
         title="Direct Hugging Face Usage",
         description="Load the dataset directly from Hugging Face Hub",
         code=hf_code
+    ))
+    
+    # Load from downloaded ZIP file example
+    zip_code = f"""from datasets import load_dataset
+import zipfile
+import tempfile
+import os
+from pathlib import Path
+
+# Path to your downloaded ZIP file
+zip_path = "{dataset_id.replace('/', '_')}{f'_{config_name}' if config_name else ''}{f'_{revision}' if revision else ''}.zip"
+
+# Check if ZIP file exists
+if not os.path.exists(zip_path):
+    print(f"ZIP file not found: {{zip_path}}")
+    print("Please download the dataset first using the 'Download ZIP' button in the UI")
+else:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        print(f"Extracting {{zip_path}}...")
+        
+        # Extract ZIP file
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+        
+        # List extracted files to understand structure
+        extracted_files = list(Path(temp_dir).rglob('*'))
+        print(f"Extracted files: {{[f.name for f in extracted_files if f.is_file()]}}")
+        
+        # Auto-detect file format and load accordingly
+        parquet_files = list(Path(temp_dir).rglob('*.parquet'))
+        json_files = list(Path(temp_dir).rglob('*.json'))
+        csv_files = list(Path(temp_dir).rglob('*.csv'))
+        
+        if parquet_files:
+            # Load from Parquet files
+            dataset = load_dataset('parquet', data_dir=temp_dir)
+        elif json_files:
+            # Load from JSON files
+            dataset = load_dataset('json', data_dir=temp_dir)
+        elif csv_files:
+            # Load from CSV files
+            dataset = load_dataset('csv', data_dir=temp_dir)
+        else:
+            # Try generic approach
+            dataset = load_dataset(temp_dir)
+        
+        print(f"Dataset loaded from ZIP file!")
+        print(f"Available splits: {{list(dataset.keys())}}")
+        
+        # Access the data
+        if 'train' in dataset:
+            train_data = dataset['train']
+            print(f"Training samples: {{len(train_data)}}")
+            print(f"Features: {{list(train_data.features.keys())}}")"""
+    
+    examples.append(CodeExample(
+        title="Load from Downloaded ZIP",
+        description="Load the dataset from a downloaded ZIP file using Hugging Face datasets",
+        code=zip_code
+    ))
+    
+    # Alternative ZIP loading method with manual file handling
+    zip_alt_code = f"""from datasets import Dataset, DatasetDict
+import zipfile
+import pandas as pd
+import json
+import tempfile
+import os
+from pathlib import Path
+
+# Method 2: Manual file handling from ZIP
+zip_path = "{dataset_id.replace('/', '_')}{f'_{config_name}' if config_name else ''}{f'_{revision}' if revision else ''}.zip"
+
+if not os.path.exists(zip_path):
+    print(f"ZIP file not found: {{zip_path}}")
+else:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Extract ZIP file
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+        
+        # Find all data files
+        data_files = {{
+            'parquet': list(Path(temp_dir).rglob('*.parquet')),
+            'json': list(Path(temp_dir).rglob('*.json')),
+            'csv': list(Path(temp_dir).rglob('*.csv'))
+        }}
+        
+        datasets = {{}}
+        
+        # Load Parquet files
+        for pq_file in data_files['parquet']:
+            split_name = pq_file.stem  # Use filename as split name
+            df = pd.read_parquet(pq_file)
+            datasets[split_name] = Dataset.from_pandas(df)
+            print(f"Loaded {{split_name}}: {{len(df)}} samples")
+        
+        # Load JSON files (if no Parquet files found)
+        if not data_files['parquet'] and data_files['json']:
+            for json_file in data_files['json']:
+                split_name = json_file.stem
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    # Handle both JSON Lines and regular JSON
+                    try:
+                        data = json.load(f)  # Regular JSON
+                        if isinstance(data, list):
+                            datasets[split_name] = Dataset.from_list(data)
+                    except:
+                        # JSON Lines format
+                        f.seek(0)
+                        data = [json.loads(line) for line in f if line.strip()]
+                        datasets[split_name] = Dataset.from_list(data)
+                print(f"Loaded {{split_name}}: {{len(datasets[split_name])}} samples")
+        
+        # Load CSV files (if no other formats found)
+        if not data_files['parquet'] and not data_files['json'] and data_files['csv']:
+            for csv_file in data_files['csv']:
+                split_name = csv_file.stem
+                df = pd.read_csv(csv_file)
+                datasets[split_name] = Dataset.from_pandas(df)
+                print(f"Loaded {{split_name}}: {{len(df)}} samples")
+        
+        # Create final dataset
+        if len(datasets) == 1:
+            dataset = list(datasets.values())[0]
+            print(f"Single dataset: {{len(dataset)}} samples")
+        else:
+            dataset = DatasetDict(datasets)
+            print(f"Dataset dict with splits: {{list(dataset.keys())}}")
+        
+        # Show features
+        if hasattr(dataset, 'features'):
+            print(f"Features: {{list(dataset.features.keys())}}")
+        else:
+            first_split = list(dataset.keys())[0]
+            print(f"Features: {{list(dataset[first_split].features.keys())}}")"""
+    
+    examples.append(CodeExample(
+        title="Advanced ZIP Loading",
+        description="Comprehensive method to load datasets from ZIP with auto-detection of file formats (Parquet, JSON, CSV)",
+        code=zip_alt_code
     ))
     
     return examples

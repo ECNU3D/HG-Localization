@@ -90,6 +90,41 @@
   box-shadow: none !important;
 }
 
+/* Basic JSON syntax highlighting for pre-formatted text */
+.json-pre {
+  color: #24292e;
+  background-color: #f6f8fa;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  padding: 12px;
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow: auto;
+  max-height: 200px;
+}
+
+.json-pre .json-key {
+  color: #032f62;
+  font-weight: 600;
+}
+
+.json-pre .json-string {
+  color: #032f62;
+}
+
+.json-pre .json-number {
+  color: #005cc5;
+}
+
+.json-pre .json-boolean {
+  color: #d73a49;
+}
+
+.json-pre .json-null {
+  color: #6f42c1;
+}
+
 /* Loading animation */
 .loading-dots {
   display: inline-block;

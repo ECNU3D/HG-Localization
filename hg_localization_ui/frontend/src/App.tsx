@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Layout } from './components/Layout';
@@ -7,6 +7,36 @@ import { DatasetsPage } from './pages/DatasetsPage';
 import { DatasetDetailPage } from './pages/DatasetDetailPage';
 import { useConfigStatus } from './hooks/useConfig';
 import './index.css';
+
+// Global error handler to suppress ResizeObserver errors
+const suppressResizeObserverErrors = () => {
+  const originalConsoleError = console.error;
+  console.error = (...args) => {
+    if (
+      args[0]?.includes?.('ResizeObserver loop completed') ||
+      args[0]?.includes?.('ResizeObserver loop limit exceeded')
+    ) {
+      return;
+    }
+    originalConsoleError.apply(console, args);
+  };
+
+  // Also handle window errors
+  const originalWindowError = window.onerror;
+  window.onerror = (message, source, lineno, colno, error) => {
+    if (
+      typeof message === 'string' && 
+      (message.includes('ResizeObserver loop completed') ||
+       message.includes('ResizeObserver loop limit exceeded'))
+    ) {
+      return true; // Prevent default error handling
+    }
+    if (originalWindowError) {
+      return originalWindowError(message, source, lineno, colno, error);
+    }
+    return false;
+  };
+};
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -69,6 +99,11 @@ function AppContent() {
 }
 
 function App() {
+  useEffect(() => {
+    // Suppress ResizeObserver errors globally
+    suppressResizeObserverErrors();
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <AppContent />
