@@ -1,4 +1,5 @@
 import click
+from .config import default_config
 from .dataset_manager import (
     download_dataset, 
     list_local_datasets, 
@@ -29,7 +30,8 @@ def download(dataset_id: str, name: str | None, revision: str | None, trust_remo
         revision=revision, 
         trust_remote_code=trust_remote_code,
         make_public=make_public,
-        skip_s3_upload=no_s3_upload
+        skip_s3_upload=no_s3_upload,
+        config=default_config
     )
     if success:
         click.secho(f"Successfully processed '{dataset_id}'. Local path: {message}", fg="green")
@@ -41,7 +43,7 @@ def download(dataset_id: str, name: str | None, revision: str | None, trust_remo
 def list_local_cmd():
     """Lists datasets available in the local cache."""
     click.echo("Listing local datasets from cache...")
-    datasets = list_local_datasets()
+    datasets = list_local_datasets(config=default_config)
     if not datasets:
         click.echo("No datasets found in local cache.")
         return
@@ -56,7 +58,7 @@ def list_local_cmd():
 def list_s3_command():
     """Lists datasets available in the configured S3 bucket."""
     click.echo("Listing datasets from S3...")
-    s3_datasets = list_s3_datasets()
+    s3_datasets = list_s3_datasets(config=default_config)
     if not s3_datasets:
         click.echo("No datasets found in S3 or S3 not configured/accessible.")
         return
@@ -88,7 +90,8 @@ def sync_local_to_s3_cmd(dataset_id: str, name: str | None, revision: str | None
         dataset_id=dataset_id, 
         config_name=name, 
         revision=revision, 
-        make_public=make_public
+        make_public=make_public,
+        config=default_config
     )
     if success:
         click.secho(f"Successfully synced '{dataset_id}' (Config: {name or 'default'}, Revision: {revision or 'default'}). {message}", fg="green")

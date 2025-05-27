@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 
-from hg_localization.utils import _get_safe_path_component, _zip_directory, _unzip_file
+from hg_localization.utils import _get_safe_path_component, _restore_dataset_name, _zip_directory, _unzip_file
 
 # --- Tests for _get_safe_path_component ---
 @pytest.mark.parametrize("input_name, expected_output", [
@@ -25,6 +25,22 @@ from hg_localization.utils import _get_safe_path_component, _zip_directory, _unz
 ])
 def test_get_safe_path_component(input_name, expected_output):
     assert _get_safe_path_component(input_name) == expected_output
+
+# --- Tests for _restore_dataset_name ---
+@pytest.mark.parametrize("safe_name, expected_output", [
+    ("dreamerdeo_finqa", "dreamerdeo/finqa"),
+    ("microsoft_DialoGPT_medium", "microsoft_DialoGPT/medium"),
+    ("huggingface_datasets", "huggingface/datasets"),
+    ("simple_dataset", "simple/dataset"),
+    ("my_data_set_realdataset", "my_data_set/realdataset"),
+    ("nounderscores", "nounderscores"),
+    ("", ""),
+    (None, ""),
+    ("single_word", "single/word"),
+    ("org_name_dataset_name", "org_name_dataset/name"),
+])
+def test_restore_dataset_name(safe_name, expected_output):
+    assert _restore_dataset_name(safe_name) == expected_output
 
 # --- Tests for _zip_directory and _unzip_file ---
 

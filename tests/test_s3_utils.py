@@ -19,13 +19,8 @@ from hg_localization.s3_utils import (
     get_s3_dataset_card_presigned_url
 )
 
-# Config values that might be monkeypatched
-from hg_localization.config import (
-    S3_BUCKET_NAME, S3_ENDPOINT_URL, AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY, S3_DATA_PREFIX,
-    DEFAULT_CONFIG_NAME, DEFAULT_REVISION_NAME,
-    PUBLIC_DATASETS_JSON_KEY
-)
+# Import the new configuration system
+from hg_localization.config import HGLocalizationConfig, default_config
 
 @pytest.fixture
 def mock_boto3_client(monkeypatch):
@@ -43,32 +38,39 @@ def mock_utils_for_s3(mocker):
 
 # --- Tests for _get_s3_client ---
 
-def test_get_s3_client_no_bucket_name(monkeypatch, capsys):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", None)
-    client = _get_s3_client()
+def test_get_s3_client_no_bucket_name(capsys):
+    config = HGLocalizationConfig(s3_bucket_name=None)
+    client = _get_s3_client(config)
     assert client is None
 
-def test_get_s3_client_no_aws_keys(monkeypatch, capsys):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", "test-bucket")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_ACCESS_KEY_ID", None)
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_SECRET_ACCESS_KEY", "secret")
-    client = _get_s3_client()
+def test_get_s3_client_no_aws_keys(capsys):
+    config = HGLocalizationConfig(
+        s3_bucket_name="test-bucket",
+        aws_access_key_id=None,
+        aws_secret_access_key="secret"
+    )
+    client = _get_s3_client(config)
     assert client is None
     
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_ACCESS_KEY_ID", "key")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_SECRET_ACCESS_KEY", None)
-    client2 = _get_s3_client()
+    config2 = HGLocalizationConfig(
+        s3_bucket_name="test-bucket",
+        aws_access_key_id="key",
+        aws_secret_access_key=None
+    )
+    client2 = _get_s3_client(config2)
     assert client2 is None
 
-def test_get_s3_client_success(mock_boto3_client, monkeypatch):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", "test-bucket")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_ACCESS_KEY_ID", "test-key")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_SECRET_ACCESS_KEY", "test-secret")
-    monkeypatch.setattr("hg_localization.s3_utils.S3_ENDPOINT_URL", "http://localhost:9000")
+def test_get_s3_client_success(mock_boto3_client):
+    config = HGLocalizationConfig(
+        s3_bucket_name="test-bucket",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        s3_endpoint_url="http://localhost:9000"
+    )
 
     mock_boto3_client["instance"].head_bucket.return_value = {}
 
-    client = _get_s3_client()
+    client = _get_s3_client(config)
     assert client == mock_boto3_client["instance"]
     mock_boto3_client["constructor"].assert_called_once_with(
         's3',
@@ -79,76 +81,88 @@ def test_get_s3_client_success(mock_boto3_client, monkeypatch):
     )
     mock_boto3_client["instance"].head_bucket.assert_called_once_with(Bucket="test-bucket")
 
-def test_get_s3_client_boto_raises_no_credentials(mock_boto3_client, monkeypatch, capsys):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", "test-bucket")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_ACCESS_KEY_ID", "key")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_SECRET_ACCESS_KEY", "secret")
+def test_get_s3_client_boto_raises_no_credentials(mock_boto3_client, capsys):
+    config = HGLocalizationConfig(
+        s3_bucket_name="test-bucket",
+        aws_access_key_id="key",
+        aws_secret_access_key="secret"
+    )
     
     mock_boto3_client["constructor"].side_effect = NoCredentialsError()
-    client = _get_s3_client()
+    client = _get_s3_client(config)
     assert client is None
     captured = capsys.readouterr()
     assert "S3 Error: AWS credentials not found" in captured.out
 
-def test_get_s3_client_head_bucket_no_such_bucket(mock_boto3_client, monkeypatch, capsys):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", "non-existent-bucket")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_ACCESS_KEY_ID", "key")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_SECRET_ACCESS_KEY", "secret")
+def test_get_s3_client_head_bucket_no_such_bucket(mock_boto3_client, capsys):
+    config = HGLocalizationConfig(
+        s3_bucket_name="non-existent-bucket",
+        aws_access_key_id="key",
+        aws_secret_access_key="secret"
+    )
     
     error_response = {'Error': {'Code': 'NoSuchBucket', 'Message': 'The specified bucket does not exist'}}
     mock_boto3_client["instance"].head_bucket.side_effect = ClientError(error_response, 'HeadBucket')
     
-    client = _get_s3_client()
+    client = _get_s3_client(config)
     assert client is None
     captured = capsys.readouterr()
     assert "S3 Error: Bucket 'non-existent-bucket' does not exist." in captured.out
 
-def test_get_s3_client_head_bucket_invalid_access_key(mock_boto3_client, monkeypatch, capsys):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", "test-bucket")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_ACCESS_KEY_ID", "invalid-key")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_SECRET_ACCESS_KEY", "secret")
+def test_get_s3_client_head_bucket_invalid_access_key(mock_boto3_client, capsys):
+    config = HGLocalizationConfig(
+        s3_bucket_name="test-bucket",
+        aws_access_key_id="invalid-key",
+        aws_secret_access_key="secret"
+    )
 
     error_response = {'Error': {'Code': 'InvalidAccessKeyId', 'Message': '...'}}
     mock_boto3_client["instance"].head_bucket.side_effect = ClientError(error_response, 'HeadBucket')
 
-    client = _get_s3_client()
+    client = _get_s3_client(config)
     assert client is None
     captured = capsys.readouterr()
     assert "S3 Error: Invalid AWS credentials provided." in captured.out
 
-def test_get_s3_client_head_bucket_signature_mismatch(mock_boto3_client, monkeypatch, capsys):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", "test-bucket")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_ACCESS_KEY_ID", "key")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_SECRET_ACCESS_KEY", "wrong-secret")
+def test_get_s3_client_head_bucket_signature_mismatch(mock_boto3_client, capsys):
+    config = HGLocalizationConfig(
+        s3_bucket_name="test-bucket",
+        aws_access_key_id="key",
+        aws_secret_access_key="wrong-secret"
+    )
 
     error_response = {'Error': {'Code': 'SignatureDoesNotMatch', 'Message': '...'}}
     mock_boto3_client["instance"].head_bucket.side_effect = ClientError(error_response, 'HeadBucket')
 
-    client = _get_s3_client()
+    client = _get_s3_client(config)
     assert client is None
     captured = capsys.readouterr()
     assert "S3 Error: Invalid AWS credentials provided." in captured.out
 
-def test_get_s3_client_head_bucket_other_client_error(mock_boto3_client, monkeypatch, capsys):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", "test-bucket")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_ACCESS_KEY_ID", "key")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_SECRET_ACCESS_KEY", "secret")
+def test_get_s3_client_head_bucket_other_client_error(mock_boto3_client, capsys):
+    config = HGLocalizationConfig(
+        s3_bucket_name="test-bucket",
+        aws_access_key_id="key",
+        aws_secret_access_key="secret"
+    )
 
     error_response = {'Error': {'Code': 'SomeOtherError', 'Message': 'Details...'}}
     mock_boto3_client["instance"].head_bucket.side_effect = ClientError(error_response, 'HeadBucket')
 
-    client = _get_s3_client()
+    client = _get_s3_client(config)
     assert client is None
     captured = capsys.readouterr()
     assert "S3 ClientError during client test: An error occurred (SomeOtherError)" in captured.out
 
-def test_get_s3_client_generic_exception(mock_boto3_client, monkeypatch, capsys):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", "test-bucket")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_ACCESS_KEY_ID", "key")
-    monkeypatch.setattr("hg_localization.s3_utils.AWS_SECRET_ACCESS_KEY", "secret")
+def test_get_s3_client_generic_exception(mock_boto3_client, capsys):
+    config = HGLocalizationConfig(
+        s3_bucket_name="test-bucket",
+        aws_access_key_id="key",
+        aws_secret_access_key="secret"
+    )
     
     mock_boto3_client["constructor"].side_effect = Exception("Unexpected error")
-    client = _get_s3_client()
+    client = _get_s3_client(config)
     assert client is None
     captured = capsys.readouterr()
     assert "Error initializing S3 client: Unexpected error" in captured.out
@@ -158,25 +172,23 @@ def test_get_s3_client_generic_exception(mock_boto3_client, monkeypatch, capsys)
 @pytest.mark.parametrize("dataset_id, config_name, revision, s3_data_prefix_val, expected_prefix", [
     ("my_dataset", "config1", "revA", "", "my_dataset/config1/revA"),
     ("user/ds-name", "conf/1", "v1.0.0", "", "user_ds-name/conf_1/v1.0.0"),
-    ("dataset_id", None, None, "", f"dataset_id/{DEFAULT_CONFIG_NAME}/{DEFAULT_REVISION_NAME}"),
-    ("dataset_id", "config1", None, "", f"dataset_id/config1/{DEFAULT_REVISION_NAME}"),
-    ("dataset_id", None, "revA", "", f"dataset_id/{DEFAULT_CONFIG_NAME}/revA"),
+    ("dataset_id", None, None, "", "dataset_id/default_config/default_revision"),
+    ("dataset_id", "config1", None, "", "dataset_id/config1/default_revision"),
+    ("dataset_id", None, "revA", "", "dataset_id/default_config/revA"),
     ("my_ds", "cfg", "rev", "data/prod", "data/prod/my_ds/cfg/rev"),
     ("my_ds", "cfg", "rev", "data/prod/", "data/prod/my_ds/cfg/rev"),
     ("my_ds", "cfg", "rev", "/data/prod", "data/prod/my_ds/cfg/rev"),
 ])
-def test_get_s3_prefix_various_inputs(mock_utils_for_s3, monkeypatch, dataset_id, config_name, revision, s3_data_prefix_val, expected_prefix):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_DATA_PREFIX", s3_data_prefix_val)
-    monkeypatch.setattr("hg_localization.config.DEFAULT_CONFIG_NAME", DEFAULT_CONFIG_NAME)
-    monkeypatch.setattr("hg_localization.config.DEFAULT_REVISION_NAME", DEFAULT_REVISION_NAME)
+def test_get_s3_prefix_various_inputs(mock_utils_for_s3, dataset_id, config_name, revision, s3_data_prefix_val, expected_prefix):
+    config = HGLocalizationConfig(s3_data_prefix=s3_data_prefix_val)
 
-    prefix = _get_s3_prefix(dataset_id, config_name, revision)
+    prefix = _get_s3_prefix(dataset_id, config_name, revision, config)
     assert prefix == expected_prefix
 
     mock_utils_for_s3["_get_safe_path_component"].assert_any_call(dataset_id)
-    cfg_to_check = config_name if config_name else DEFAULT_CONFIG_NAME
+    cfg_to_check = config_name if config_name else config.default_config_name
     mock_utils_for_s3["_get_safe_path_component"].assert_any_call(cfg_to_check)
-    rev_to_check = revision if revision else DEFAULT_REVISION_NAME
+    rev_to_check = revision if revision else config.default_revision_name
     mock_utils_for_s3["_get_safe_path_component"].assert_any_call(rev_to_check)
 
 # --- Tests for _get_prefixed_s3_key ---
@@ -187,9 +199,9 @@ def test_get_s3_prefix_various_inputs(mock_utils_for_s3, monkeypatch, dataset_id
     ("my_file.txt", "", "my_file.txt"),
     ("/other/file.json", "", "other/file.json"),
 ])
-def test_get_prefixed_s3_key(monkeypatch, base_key, s3_data_prefix_val, expected_key):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_DATA_PREFIX", s3_data_prefix_val)
-    key = _get_prefixed_s3_key(base_key)
+def test_get_prefixed_s3_key(base_key, s3_data_prefix_val, expected_key):
+    config = HGLocalizationConfig(s3_data_prefix=s3_data_prefix_val)
+    key = _get_prefixed_s3_key(base_key, config)
     assert key == expected_key
 
 # --- Tests for _check_s3_dataset_exists ---
@@ -425,7 +437,7 @@ def test_update_public_datasets_json_no_s3_client(capsys):
     # No print from this specific early exit condition
 
 @patch("hg_localization.s3_utils._get_prefixed_s3_key")
-def test_update_public_datasets_json_creates_new_if_not_exists(mock_get_prefixed_key, mock_boto3_client, monkeypatch, capsys):
+def test_update_public_datasets_json_creates_new_if_not_exists(mock_get_prefixed_key, mock_boto3_client, capsys):
     mock_client = mock_boto3_client["instance"]
     bucket = "json-update-bucket"
     dataset_id = "new_ds_in_json"
@@ -433,17 +445,21 @@ def test_update_public_datasets_json_creates_new_if_not_exists(mock_get_prefixed
     revision = "rev_new"
     zip_key = "path/to/new_ds.zip"
     public_json_s3_key = "global_prefix/public_datasets.json"
+    
+    config = HGLocalizationConfig(
+        s3_bucket_name=bucket,
+        public_datasets_json_key="public_datasets.json",
+        default_config_name="default_config",
+        default_revision_name="default_revision"
+    )
 
     mock_get_prefixed_key.return_value = public_json_s3_key
-    monkeypatch.setattr("hg_localization.s3_utils.PUBLIC_DATASETS_JSON_KEY", "public_datasets.json")
-    monkeypatch.setattr("hg_localization.config.DEFAULT_CONFIG_NAME", "default_config") # For entry key construction
-    monkeypatch.setattr("hg_localization.config.DEFAULT_REVISION_NAME", "default_revision")
 
     error_no_such_key = ClientError({'Error': {'Code': 'NoSuchKey'}}, 'GetObject')
     mock_client.get_object.side_effect = error_no_such_key
     mock_client.put_object.return_value = {} # Simulate successful put
 
-    success = _update_public_datasets_json(mock_client, bucket, dataset_id, config_name, revision, zip_key)
+    success = _update_public_datasets_json(mock_client, bucket, dataset_id, config_name, revision, zip_key, config=config)
     assert success is True
 
     mock_client.get_object.assert_called_once_with(Bucket=bucket, Key=public_json_s3_key)
@@ -470,7 +486,7 @@ def test_update_public_datasets_json_creates_new_if_not_exists(mock_get_prefixed
     assert f"Successfully updated and published {public_json_s3_key} in S3." in captured.out
 
 @patch("hg_localization.s3_utils._get_prefixed_s3_key")
-def test_update_public_datasets_json_updates_existing(mock_get_prefixed_key, mock_boto3_client, monkeypatch, capsys):
+def test_update_public_datasets_json_updates_existing(mock_get_prefixed_key, mock_boto3_client, capsys):
     mock_client = mock_boto3_client["instance"]
     bucket = "json-update-existing-bucket"
     dataset_id = "existing_ds"
@@ -480,10 +496,12 @@ def test_update_public_datasets_json_updates_existing(mock_get_prefixed_key, moc
     public_json_s3_key = "global_prefix/public_manifest.json"
 
     mock_get_prefixed_key.return_value = public_json_s3_key
-    monkeypatch.setattr("hg_localization.s3_utils.PUBLIC_DATASETS_JSON_KEY", "public_manifest.json")
-    # Patch default names from the *config* module, as that's where _update_public_datasets_json imports them from
-    monkeypatch.setattr("hg_localization.config.DEFAULT_CONFIG_NAME", "default_cfg_name_test")
-    monkeypatch.setattr("hg_localization.config.DEFAULT_REVISION_NAME", "default_rev_name_test")
+    config = HGLocalizationConfig(
+        s3_bucket_name=bucket,
+        public_datasets_json_key="public_manifest.json",
+        default_config_name="default_cfg_name_test",
+        default_revision_name="default_rev_name_test"
+    )
 
     initial_json_content = {
         "other_ds---default---v1": {"dataset_id": "other_ds", "s3_zip_key": "...", "s3_bucket": bucket}
@@ -493,7 +511,7 @@ def test_update_public_datasets_json_updates_existing(mock_get_prefixed_key, moc
     mock_client.get_object.return_value = {'Body': mock_response_body}
     mock_client.put_object.return_value = {}
 
-    success = _update_public_datasets_json(mock_client, bucket, dataset_id, config_name, revision, zip_key)
+    success = _update_public_datasets_json(mock_client, bucket, dataset_id, config_name, revision, zip_key, config=config)
     assert success is True
 
     # Use the monkeypatched DEFAULT_CONFIG_NAME for expected_entry_key
@@ -517,14 +535,17 @@ def test_update_public_datasets_json_updates_existing(mock_get_prefixed_key, moc
     )
 
 @patch("hg_localization.s3_utils._get_prefixed_s3_key")
-def test_update_public_datasets_json_corrupted_json(mock_get_prefixed_key, mock_boto3_client, monkeypatch, capsys):
+def test_update_public_datasets_json_corrupted_json(mock_get_prefixed_key, mock_boto3_client, capsys):
     mock_client = mock_boto3_client["instance"]
     bucket = "json-corrupt-bucket"
     public_json_s3_key = "global/corrupt.json"
     mock_get_prefixed_key.return_value = public_json_s3_key
-    monkeypatch.setattr("hg_localization.s3_utils.PUBLIC_DATASETS_JSON_KEY", "corrupt.json")
-    monkeypatch.setattr("hg_localization.config.DEFAULT_CONFIG_NAME", "def_cfg")
-    monkeypatch.setattr("hg_localization.config.DEFAULT_REVISION_NAME", "def_rev")
+    config = HGLocalizationConfig(
+        s3_bucket_name=bucket,
+        public_datasets_json_key="corrupt.json",
+        default_config_name="def_cfg",
+        default_revision_name="def_rev"
+    )
 
     mock_response_body = MagicMock()
     mock_response_body.read.return_value = b"this is not json"
@@ -532,7 +553,7 @@ def test_update_public_datasets_json_corrupted_json(mock_get_prefixed_key, mock_
     mock_client.put_object.return_value = {}
 
     dataset_id, cfg, rev, zip_k = "ds_replacing_corrupt", "c1", "r1", "p/z.zip"
-    success = _update_public_datasets_json(mock_client, bucket, dataset_id, cfg, rev, zip_k)
+    success = _update_public_datasets_json(mock_client, bucket, dataset_id, cfg, rev, zip_k, config=config)
     assert success is True
 
     expected_entry_key = f"{dataset_id}---{cfg}---{rev}"
@@ -551,36 +572,38 @@ def test_update_public_datasets_json_corrupted_json(mock_get_prefixed_key, mock_
     assert f"Error: {public_json_s3_key} in S3 is corrupted. Will overwrite." in captured.out
 
 @patch("hg_localization.s3_utils._get_prefixed_s3_key")
-def test_update_public_datasets_json_get_object_client_error(mock_get_prefixed_key, mock_boto3_client, monkeypatch, capsys):
+def test_update_public_datasets_json_get_object_client_error(mock_get_prefixed_key, mock_boto3_client, capsys):
     mock_client = mock_boto3_client["instance"]
     public_json_s3_key = "global/public.json"
     mock_get_prefixed_key.return_value = public_json_s3_key
-    monkeypatch.setattr("hg_localization.s3_utils.PUBLIC_DATASETS_JSON_KEY", "public.json")
+    config = HGLocalizationConfig(public_datasets_json_key="public.json")
     
     error_access_denied = ClientError({'Error': {'Code': 'AccessDenied'}}, 'GetObject')
     mock_client.get_object.side_effect = error_access_denied
 
-    success = _update_public_datasets_json(mock_client, "bucket", "ds", "c", "r", "z.zip")
+    success = _update_public_datasets_json(mock_client, "bucket", "ds", "c", "r", "z.zip", config=config)
     assert success is False
     mock_client.put_object.assert_not_called()
     captured = capsys.readouterr()
     assert f"Error fetching {public_json_s3_key} from S3: An error occurred (AccessDenied)" in captured.out
 
 @patch("hg_localization.s3_utils._get_prefixed_s3_key")
-def test_update_public_datasets_json_put_object_fails(mock_get_prefixed_key, mock_boto3_client, monkeypatch, capsys):
+def test_update_public_datasets_json_put_object_fails(mock_get_prefixed_key, mock_boto3_client, capsys):
     mock_client = mock_boto3_client["instance"]
     public_json_s3_key = "global_prefix/manifest.json"
     mock_get_prefixed_key.return_value = public_json_s3_key
-    monkeypatch.setattr("hg_localization.s3_utils.PUBLIC_DATASETS_JSON_KEY", "manifest.json")
-    monkeypatch.setattr("hg_localization.config.DEFAULT_CONFIG_NAME", "default_config") 
-    monkeypatch.setattr("hg_localization.config.DEFAULT_REVISION_NAME", "default_revision")
+    config = HGLocalizationConfig(
+        public_datasets_json_key="manifest.json",
+        default_config_name="default_config",
+        default_revision_name="default_revision"
+    )
 
     # Simulate get_object succeeding (e.g., file doesn't exist, so current_config is empty)
     error_no_such_key = ClientError({'Error': {'Code': 'NoSuchKey'}}, 'GetObject')
     mock_client.get_object.side_effect = error_no_such_key
     mock_client.put_object.side_effect = ClientError({'Error': {'Code': 'InternalError'}}, 'PutObject')
 
-    success = _update_public_datasets_json(mock_client, "put-fail-bucket", "ds_put_fail", "cfg", "rev", "zip.zip")
+    success = _update_public_datasets_json(mock_client, "put-fail-bucket", "ds_put_fail", "cfg", "rev", "zip.zip", config=config)
     assert success is False
     mock_client.put_object.assert_called_once() # It was attempted
     captured = capsys.readouterr()
@@ -603,28 +626,28 @@ def test_get_s3_public_url(bucket, key, endpoint, expected_url):
 
 @patch("hg_localization.s3_utils._get_s3_client")
 @patch("hg_localization.s3_utils._get_s3_prefix")
-def test_get_s3_dataset_card_presigned_url_s3_not_configured(mock_get_prefix, mock_get_s3_cli, monkeypatch, capsys):
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", None)
+def test_get_s3_dataset_card_presigned_url_s3_not_configured(mock_get_prefix, mock_get_s3_cli, capsys):
+    config = HGLocalizationConfig(s3_bucket_name=None)
     mock_get_s3_cli.return_value = MagicMock() # Client might exist but bucket name is crucial
-    url = get_s3_dataset_card_presigned_url("ds_id")
+    url = get_s3_dataset_card_presigned_url("ds_id", config=config)
     assert url is None
     captured = capsys.readouterr()
     assert "S3 client not available or bucket not configured" in captured.out
 
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", "a-bucket")
+    config2 = HGLocalizationConfig(s3_bucket_name="a-bucket")
     mock_get_s3_cli.return_value = None # Client is None
-    url2 = get_s3_dataset_card_presigned_url("ds_id2")
+    url2 = get_s3_dataset_card_presigned_url("ds_id2", config=config2)
     assert url2 is None
     captured2 = capsys.readouterr()
     assert "S3 client not available or bucket not configured" in captured2.out
 
 @patch("hg_localization.s3_utils._get_s3_client")
 @patch("hg_localization.s3_utils._get_s3_prefix")
-def test_get_s3_dataset_card_presigned_url_card_not_found_404(mock_get_prefix, mock_get_s3_cli, monkeypatch, capsys):
+def test_get_s3_dataset_card_presigned_url_card_not_found_404(mock_get_prefix, mock_get_s3_cli, capsys):
     mock_client = MagicMock()
     mock_get_s3_cli.return_value = mock_client
     bucket = "presign-bucket"
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", bucket)
+    config = HGLocalizationConfig(s3_bucket_name=bucket)
     
     dataset_id, cfg, rev = "ds_presign_404", "c1", "r1"
     expected_s3_prefix = f"data_prefix/{dataset_id}/{cfg}/{rev}" # Example, adjust if needed
@@ -634,9 +657,9 @@ def test_get_s3_dataset_card_presigned_url_card_not_found_404(mock_get_prefix, m
     error_404 = ClientError({'Error': {'Code': '404'}}, 'HeadObject')
     mock_client.head_object.side_effect = error_404
 
-    url = get_s3_dataset_card_presigned_url(dataset_id, cfg, rev)
+    url = get_s3_dataset_card_presigned_url(dataset_id, cfg, rev, config=config)
     assert url is None
-    mock_get_prefix.assert_called_once_with(dataset_id, cfg, rev)
+    mock_get_prefix.assert_called_once_with(dataset_id, cfg, rev, config)
     mock_client.head_object.assert_called_once_with(Bucket=bucket, Key=expected_card_key)
     mock_client.generate_presigned_url.assert_not_called()
     captured = capsys.readouterr()
@@ -644,11 +667,11 @@ def test_get_s3_dataset_card_presigned_url_card_not_found_404(mock_get_prefix, m
 
 @patch("hg_localization.s3_utils._get_s3_client")
 @patch("hg_localization.s3_utils._get_s3_prefix")
-def test_get_s3_dataset_card_presigned_url_head_object_other_client_error(mock_get_prefix, mock_get_s3_cli, monkeypatch, capsys):
+def test_get_s3_dataset_card_presigned_url_head_object_other_client_error(mock_get_prefix, mock_get_s3_cli, capsys):
     mock_client = MagicMock()
     mock_get_s3_cli.return_value = mock_client
     bucket = "presign-head-err-bucket"
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", bucket)
+    config = HGLocalizationConfig(s3_bucket_name=bucket)
     expected_s3_prefix = "prefix/for/card_head_err"
     mock_get_prefix.return_value = expected_s3_prefix
     expected_card_key = f"{expected_s3_prefix}/dataset_card.md"
@@ -656,7 +679,7 @@ def test_get_s3_dataset_card_presigned_url_head_object_other_client_error(mock_g
     error_other = ClientError({'Error': {'Code': 'SomeError'}}, 'HeadObject')
     mock_client.head_object.side_effect = error_other
 
-    url = get_s3_dataset_card_presigned_url("ds_head_err")
+    url = get_s3_dataset_card_presigned_url("ds_head_err", config=config)
     assert url is None
     mock_client.head_object.assert_called_once_with(Bucket=bucket, Key=expected_card_key)
     captured = capsys.readouterr()
@@ -664,11 +687,11 @@ def test_get_s3_dataset_card_presigned_url_head_object_other_client_error(mock_g
 
 @patch("hg_localization.s3_utils._get_s3_client")
 @patch("hg_localization.s3_utils._get_s3_prefix")
-def test_get_s3_dataset_card_presigned_url_generate_url_exception(mock_get_prefix, mock_get_s3_cli, monkeypatch, capsys):
+def test_get_s3_dataset_card_presigned_url_generate_url_exception(mock_get_prefix, mock_get_s3_cli, capsys):
     mock_client = MagicMock()
     mock_get_s3_cli.return_value = mock_client
     bucket = "presign-gen-err-bucket"
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", bucket)
+    config = HGLocalizationConfig(s3_bucket_name=bucket)
     expected_s3_prefix = "prefix/for/card_gen_err"
     mock_get_prefix.return_value = expected_s3_prefix
     expected_card_key = f"{expected_s3_prefix}/dataset_card.md"
@@ -676,7 +699,7 @@ def test_get_s3_dataset_card_presigned_url_generate_url_exception(mock_get_prefi
     mock_client.head_object.return_value = {} # Card exists
     mock_client.generate_presigned_url.side_effect = Exception("Presign generation failed")
 
-    url = get_s3_dataset_card_presigned_url("ds_gen_err")
+    url = get_s3_dataset_card_presigned_url("ds_gen_err", config=config)
     assert url is None
     mock_client.generate_presigned_url.assert_called_once_with(
         'get_object',
@@ -688,20 +711,19 @@ def test_get_s3_dataset_card_presigned_url_generate_url_exception(mock_get_prefi
 
 @patch("hg_localization.s3_utils._get_s3_client")
 @patch("hg_localization.s3_utils._get_s3_prefix")
-def test_get_s3_dataset_card_presigned_url_success(mock_get_prefix, mock_get_s3_cli, monkeypatch, capsys):
+def test_get_s3_dataset_card_presigned_url_success(mock_get_prefix, mock_get_s3_cli, capsys):
     mock_client = MagicMock()
     mock_get_s3_cli.return_value = mock_client
     bucket = "presign-success-bucket"
     dataset_id, cfg, rev = "ds_presign_ok", "my_config", None # Test with None revision
     expires = 1800
 
-    monkeypatch.setattr("hg_localization.s3_utils.S3_BUCKET_NAME", bucket)
-    # Patch default names from config as _get_s3_prefix uses them
-    monkeypatch.setattr("hg_localization.config.DEFAULT_REVISION_NAME", "default_revision_for_test")
+    config = HGLocalizationConfig(
+        s3_bucket_name=bucket,
+        default_revision_name="default_revision_for_test"
+    )
     
-    # Ensure DEFAULT_REVISION_NAME from the monkeypatch is used in the expected prefix
-    # Retrieve the patched value directly from the config module where it was set
-    expected_s3_prefix = f"data_prefix_ok/{dataset_id}/{cfg}/{DEFAULT_REVISION_NAME}" 
+    expected_s3_prefix = f"data_prefix_ok/{dataset_id}/{cfg}/default_revision_for_test" 
     mock_get_prefix.return_value = expected_s3_prefix
     expected_card_key = f"{expected_s3_prefix}/dataset_card.md"
     presigned_url_val = f"https://{bucket}.s3.amazonaws.com/{expected_card_key}?signature=blah"
@@ -709,10 +731,10 @@ def test_get_s3_dataset_card_presigned_url_success(mock_get_prefix, mock_get_s3_
     mock_client.head_object.return_value = {} # Card found by head_object
     mock_client.generate_presigned_url.return_value = presigned_url_val
 
-    url = get_s3_dataset_card_presigned_url(dataset_id, cfg, rev, expires_in=expires)
+    url = get_s3_dataset_card_presigned_url(dataset_id, cfg, rev, expires_in=expires, config=config)
     assert url == presigned_url_val
 
-    mock_get_prefix.assert_called_once_with(dataset_id, cfg, rev)
+    mock_get_prefix.assert_called_once_with(dataset_id, cfg, rev, config)
     mock_client.head_object.assert_called_once_with(Bucket=bucket, Key=expected_card_key)
     mock_client.generate_presigned_url.assert_called_once_with(
         'get_object',

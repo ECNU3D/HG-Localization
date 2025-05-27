@@ -1,6 +1,6 @@
 import pytest
 from click.testing import CliRunner
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, ANY
 
 # Assuming cli.py is in hg_localization folder, and this test is in tests/
 # Adjust import path if structure is different
@@ -38,7 +38,8 @@ def test_download_command_success(mock_dataset_manager_functions):
         revision="rev1", 
         trust_remote_code=True,
         make_public=False, # Default for make_public flag
-        skip_s3_upload=True
+        skip_s3_upload=True,
+        config=ANY  # The CLI now passes the default_config
     )
 
 def test_download_command_failure(mock_dataset_manager_functions):
@@ -68,6 +69,7 @@ def test_list_local_command_with_data(mock_dataset_manager_functions):
     assert "Available local datasets (cache):" in result.output
     assert "ID: ds1, Config: cfgA, Revision: revB" in result.output
     assert "ID: ds2, Config: default, Revision: default" in result.output # Check default display
+    mock_dataset_manager_functions["list_local_datasets"].assert_called_once_with(config=ANY)
 
 def test_list_s3_command_empty(mock_dataset_manager_functions):
     runner = CliRunner()
@@ -88,6 +90,7 @@ def test_list_s3_command_with_data(mock_dataset_manager_functions):
     assert f"Found {len(mock_data)} dataset version(s) in S3:" in result.output
     assert "ID: s3_ds1, Config: s3_cfgA, Revision: s3_revB, Card (S3): http://s3_card_link_1" in result.output
     assert "ID: s3_ds2, Config: default, Revision: s3_revC, Card (S3): Not available" in result.output
+    mock_dataset_manager_functions["list_s3_datasets"].assert_called_once_with(config=ANY)
 
 def test_sync_local_to_s3_command_success(mock_dataset_manager_functions):
     runner = CliRunner()
@@ -101,7 +104,8 @@ def test_sync_local_to_s3_command_success(mock_dataset_manager_functions):
         dataset_id="my_dataset_to_sync",
         config_name="specific_config",
         revision=None, # Default if not provided
-        make_public=True
+        make_public=True,
+        config=ANY  # The CLI now passes the default_config
     )
 
 def test_sync_local_to_s3_command_failure(mock_dataset_manager_functions):

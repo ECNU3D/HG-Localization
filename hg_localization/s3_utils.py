@@ -7,41 +7,40 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import NoCredentialsError, ClientError
 
-# Import S3 specific configurations and general utils
-from .config import (
-    S3_BUCKET_NAME, S3_ENDPOINT_URL, AWS_ACCESS_KEY_ID, 
-    AWS_SECRET_ACCESS_KEY, S3_DATA_PREFIX, 
-    PUBLIC_DATASETS_JSON_KEY, PUBLIC_DATASETS_ZIP_DIR_PREFIX
-)
+# Import the config class and default instance
+from .config import HGLocalizationConfig, default_config
 from .utils import _get_safe_path_component # If _get_safe_path_component is in utils.py
 
 # --- S3 Client and Core S3 Operations ---
 
-def _get_s3_client() -> Optional[Any]: # boto3.client type hint can be tricky
+def _get_s3_client(config: Optional[HGLocalizationConfig] = None) -> Optional[Any]: # boto3.client type hint can be tricky
     """Initializes and returns an S3 client if configuration is valid and credentials are provided."""
-    if not S3_BUCKET_NAME:
+    if config is None:
+        config = default_config
+        
+    if not config.s3_bucket_name:
         return None
     
-    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+    if not config.aws_access_key_id or not config.aws_secret_access_key:
         return None
 
     try:
         s3_client = boto3.client(
             's3',
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-            endpoint_url=S3_ENDPOINT_URL, 
+            aws_access_key_id=config.aws_access_key_id,
+            aws_secret_access_key=config.aws_secret_access_key,
+            endpoint_url=config.s3_endpoint_url, 
             config=Config(s3={"addressing_style": "virtual", "aws_chunked_encoding_enabled": False},
                           signature_version='v4')
         )
-        s3_client.head_bucket(Bucket=S3_BUCKET_NAME) 
+        s3_client.head_bucket(Bucket=config.s3_bucket_name) 
         return s3_client
     except NoCredentialsError:
         print("S3 Error: AWS credentials not found during client initialization.")
         return None
     except ClientError as e:
         if e.response['Error']['Code'] == 'NoSuchBucket':
-            print(f"S3 Error: Bucket '{S3_BUCKET_NAME}' does not exist.")
+            print(f"S3 Error: Bucket '{config.s3_bucket_name}' does not exist.")
         elif e.response['Error']['Code'] == 'InvalidAccessKeyId' or e.response['Error']['Code'] == 'SignatureDoesNotMatch':
              print(f"S3 Error: Invalid AWS credentials provided.")
         else:
@@ -51,25 +50,29 @@ def _get_s3_client() -> Optional[Any]: # boto3.client type hint can be tricky
         print(f"Error initializing S3 client: {e}")
         return None
 
-def _get_s3_prefix(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None) -> str:
+def _get_s3_prefix(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None) -> str:
     """Constructs the S3 prefix for a dataset version, including the global S3_DATA_PREFIX."""
-    from .config import DEFAULT_CONFIG_NAME, DEFAULT_REVISION_NAME # Delayed import to avoid circular if utils imports config
+    if config is None:
+        config = default_config
     
     safe_dataset_id = _get_safe_path_component(dataset_id)
-    safe_config_name = _get_safe_path_component(config_name if config_name else DEFAULT_CONFIG_NAME)
-    safe_revision = _get_safe_path_component(revision if revision else DEFAULT_REVISION_NAME)
+    safe_config_name = _get_safe_path_component(config_name if config_name else config.default_config_name)
+    safe_revision = _get_safe_path_component(revision if revision else config.default_revision_name)
     
     base_dataset_s3_prefix = f"{safe_dataset_id}/{safe_config_name}/{safe_revision}"
     
-    if S3_DATA_PREFIX:
-        return f"{S3_DATA_PREFIX.strip('/')}/{base_dataset_s3_prefix}"
+    if config.s3_data_prefix:
+        return f"{config.s3_data_prefix}/{base_dataset_s3_prefix}"
     return base_dataset_s3_prefix
 
-def _get_prefixed_s3_key(base_key: str) -> str:
+def _get_prefixed_s3_key(base_key: str, config: Optional[HGLocalizationConfig] = None) -> str:
     """Constructs the full S3 key by prepending S3_DATA_PREFIX if set."""
+    if config is None:
+        config = default_config
+        
     stripped_base_key = base_key.lstrip('/')
-    if S3_DATA_PREFIX:
-        return f"{S3_DATA_PREFIX.strip('/')}/{stripped_base_key}"
+    if config.s3_data_prefix:
+        return f"{config.s3_data_prefix}/{stripped_base_key}"
     return stripped_base_key
 
 def _check_s3_dataset_exists(s3_client: Any, bucket_name: str, s3_prefix_for_dataset_version: str) -> bool:
@@ -144,16 +147,18 @@ def _download_directory_from_s3(s3_client: Any, local_directory: Path, s3_bucket
 
 # --- Public Datasets Manifest (public_datasets.json) Utilities ---
 
-def _update_public_datasets_json(s3_client: Any, bucket_name: str, dataset_id: str, config_name: Optional[str], revision: Optional[str], zip_s3_key_relative_to_prefix: str) -> bool:
+def _update_public_datasets_json(s3_client: Any, bucket_name: str, dataset_id: str, config_name: Optional[str], revision: Optional[str], zip_s3_key_relative_to_prefix: str, config: Optional[HGLocalizationConfig] = None) -> bool:
     """Updates the public_datasets.json file in S3."""
-    from .config import DEFAULT_CONFIG_NAME, DEFAULT_REVISION_NAME # Delayed import
+    if config is None:
+        config = default_config
+        
     if not s3_client: return False
     
-    current_config = {}
-    full_json_s3_key = _get_prefixed_s3_key(PUBLIC_DATASETS_JSON_KEY)
+    current_config_data = {}
+    full_json_s3_key = _get_prefixed_s3_key(config.public_datasets_json_key, config)
     try:
         response = s3_client.get_object(Bucket=bucket_name, Key=full_json_s3_key)
-        current_config = json.loads(response['Body'].read().decode('utf-8'))
+        current_config_data = json.loads(response['Body'].read().decode('utf-8'))
     except ClientError as e:
         if e.response['Error']['Code'] == 'NoSuchKey':
             print(f"{full_json_s3_key} not found in S3, will create a new one.")
@@ -162,10 +167,10 @@ def _update_public_datasets_json(s3_client: Any, bucket_name: str, dataset_id: s
             return False
     except json.JSONDecodeError:
         print(f"Error: {full_json_s3_key} in S3 is corrupted. Will overwrite.")
-        current_config = {}
+        current_config_data = {}
 
-    entry_key = f"{dataset_id}---{config_name or DEFAULT_CONFIG_NAME}---{revision or DEFAULT_REVISION_NAME}"
-    current_config[entry_key] = {
+    entry_key = f"{dataset_id}---{config_name or config.default_config_name}---{revision or config.default_revision_name}"
+    current_config_data[entry_key] = {
         "dataset_id": dataset_id,
         "config_name": config_name,
         "revision": revision,
@@ -177,7 +182,7 @@ def _update_public_datasets_json(s3_client: Any, bucket_name: str, dataset_id: s
         s3_client.put_object(
             Bucket=bucket_name,
             Key=full_json_s3_key,
-            Body=json.dumps(current_config, indent=2),
+            Body=json.dumps(current_config_data, indent=2),
             ContentType='application/json',
             ACL='public-read'
         )
@@ -199,34 +204,37 @@ def _get_s3_public_url(bucket_name: str, s3_key: str, endpoint_url: Optional[str
     else:
         return f"https://{bucket_name}.s3.amazonaws.com/{s3_key.lstrip('/')}"
 
-def get_s3_dataset_card_presigned_url(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, expires_in: int = 3600) -> Optional[str]:
-    """Generates a pre-signed URL for the dataset_card.md in the private S3 path."""
-    s3_client = _get_s3_client()
-    version_str = f"(dataset: {dataset_id}, config: {config_name or 'default'}, revision: {revision or 'default'})"
-
-    if not s3_client or not S3_BUCKET_NAME:
-        print(f"S3 client not available or bucket not configured. Cannot generate presigned URL for dataset card {version_str}.")
+def get_s3_dataset_card_presigned_url(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, expires_in: int = 3600, config: Optional[HGLocalizationConfig] = None) -> Optional[str]:
+    """Generates a presigned URL for accessing a dataset card stored in S3."""
+    if config is None:
+        config = default_config
+        
+    s3_client = _get_s3_client(config)
+    if not s3_client or not config.s3_bucket_name:
+        print("S3 client not available or bucket not configured. Cannot generate presigned URL.")
         return None
 
-    # The s3_prefix_path already includes S3_DATA_PREFIX if set
-    s3_prefix_path_for_dataset_version = _get_s3_prefix(dataset_id, config_name, revision)
-    s3_card_key_full = f"{s3_prefix_path_for_dataset_version.rstrip('/')}/dataset_card.md"
+    s3_prefix_path = _get_s3_prefix(dataset_id, config_name, revision, config)
+    s3_card_key = f"{s3_prefix_path.rstrip('/')}/dataset_card.md"
 
     try:
-        s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=s3_card_key_full)
-        url = s3_client.generate_presigned_url(
+        # First check if the dataset card exists
+        s3_client.head_object(Bucket=config.s3_bucket_name, Key=s3_card_key)
+        
+        # If it exists, generate the presigned URL
+        presigned_url = s3_client.generate_presigned_url(
             'get_object',
-            Params={'Bucket': S3_BUCKET_NAME, 'Key': s3_card_key_full},
+            Params={'Bucket': config.s3_bucket_name, 'Key': s3_card_key},
             ExpiresIn=expires_in
         )
-        print(f"Generated presigned URL for dataset card {s3_card_key_full}: {url}")
-        return url
+        print(f"Generated presigned URL for dataset card {s3_card_key}: {presigned_url}")
+        return presigned_url
     except ClientError as e:
-        if e.response.get('Error', {}).get('Code') == '404':
-            print(f"Cannot generate presigned URL: Dataset card not found on S3 at {s3_card_key_full}")
+        if e.response['Error']['Code'] == '404':
+            print(f"Cannot generate presigned URL: Dataset card not found on S3 at {s3_card_key}")
         else:
-            print(f"S3 ClientError when checking/generating presigned URL for {s3_card_key_full}: {e}")
+            print(f"S3 ClientError when checking/generating presigned URL for {s3_card_key}: {e}")
         return None
     except Exception as e:
-        print(f"Unexpected error generating presigned URL for {s3_card_key_full}: {e}")
+        print(f"Unexpected error generating presigned URL for {s3_card_key}: {e}")
         return None 

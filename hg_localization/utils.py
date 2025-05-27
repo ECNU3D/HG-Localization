@@ -16,6 +16,34 @@ def _get_safe_path_component(name: Optional[str]) -> str:
     # Replace unsafe characters with underscores, but preserve single quotes
     return name.replace("/", "_").replace("\\", "_").replace(":", "_").replace("*", "_").replace("?", "_").replace("\"", "_").replace("<", "_").replace(">", "_").replace("|", "_").replace(" ", "_")
 
+def _restore_dataset_name(safe_name: Optional[str]) -> str:
+    """Converts a safe path component back to original dataset name format.
+    
+    This function attempts to restore the original dataset name by converting
+    underscores back to forward slashes. It uses a heuristic approach:
+    - If there's only one underscore, convert it to a forward slash
+    - If there are multiple underscores, convert the last one to a forward slash
+      (assuming the most common pattern is org/dataset_name)
+    
+    Examples:
+        'dreamerdeo_finqa' -> 'dreamerdeo/finqa'
+        'my_data_set_realdataset' -> 'my_data_set/realdataset'
+        'simple_dataset' -> 'simple/dataset'
+        'huggingface_datasets' -> 'huggingface/datasets'
+        'microsoft_DialoGPT_medium' -> 'microsoft/DialoGPT_medium'
+    """
+    if not safe_name:
+        return ""
+    
+    # Find the last underscore and replace it with a forward slash
+    last_underscore_index = safe_name.rfind('_')
+    if last_underscore_index == -1:
+        # No underscore found, return as is
+        return safe_name
+    
+    # Replace only the last underscore with a forward slash
+    return safe_name[:last_underscore_index] + '/' + safe_name[last_underscore_index + 1:]
+
 def _zip_directory(directory_path: Path, zip_path: Path) -> bool:
     """Zips the contents of a directory."""
     if not directory_path.is_dir():

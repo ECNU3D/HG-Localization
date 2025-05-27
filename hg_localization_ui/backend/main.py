@@ -1,11 +1,13 @@
 import os
 import sys
 import asyncio
+import json
+import base64
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -20,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from hg_localization import (
+    HGLocalizationConfig,
     download_dataset,
     load_local_dataset,
     list_local_datasets,
@@ -30,15 +33,9 @@ from hg_localization import (
     upload_dataset
 )
 
-# Global configuration state
-app_config = {
-    "s3_bucket_name": None,
-    "s3_endpoint_url": None,
-    "aws_access_key_id": None,
-    "aws_secret_access_key": None,
-    "s3_data_prefix": "",
-    "has_credentials": False
-}
+# Cookie configuration
+COOKIE_NAME = "hg_localization_config"
+COOKIE_MAX_AGE = 30 * 24 * 60 * 60  # 30 days in seconds
 
 # WebSocket connection manager for real-time updates
 class ConnectionManager:
@@ -135,67 +132,115 @@ class CodeExample(BaseModel):
     code: str
     language: str = "python"
 
-def update_environment_variables():
-    """Update environment variables based on current app config"""
-    if app_config["s3_bucket_name"]:
-        os.environ["HGLOC_S3_BUCKET_NAME"] = app_config["s3_bucket_name"]
+def encode_config_cookie(config: S3Config) -> str:
+    """Encode configuration as a base64 cookie value"""
+    config_dict = config.model_dump()
+    config_json = json.dumps(config_dict)
+    return base64.b64encode(config_json.encode()).decode()
+
+def decode_config_cookie(cookie_value: str) -> Optional[S3Config]:
+    """Decode configuration from a base64 cookie value"""
+    try:
+        config_json = base64.b64decode(cookie_value.encode()).decode()
+        config_dict = json.loads(config_json)
+        return S3Config(**config_dict)
+    except Exception:
+        return None
+
+def get_config_from_request(request: Request) -> Optional[HGLocalizationConfig]:
+    """Extract configuration from request cookies and create HGLocalizationConfig"""
+    cookie_value = request.cookies.get(COOKIE_NAME)
+    if not cookie_value:
+        return None
     
-    if app_config["s3_endpoint_url"]:
-        os.environ["HGLOC_S3_ENDPOINT_URL"] = app_config["s3_endpoint_url"]
+    s3_config = decode_config_cookie(cookie_value)
+    if not s3_config:
+        return None
     
-    if app_config["aws_access_key_id"]:
-        os.environ["HGLOC_AWS_ACCESS_KEY_ID"] = app_config["aws_access_key_id"]
+    return HGLocalizationConfig(
+        s3_bucket_name=s3_config.s3_bucket_name,
+        s3_endpoint_url=s3_config.s3_endpoint_url,
+        aws_access_key_id=s3_config.aws_access_key_id,
+        aws_secret_access_key=s3_config.aws_secret_access_key,
+        s3_data_prefix=s3_config.s3_data_prefix or ""
+    )
+
+def is_public_access_only(config: Optional[HGLocalizationConfig]) -> bool:
+    """Determine if this is public access only (no credentials provided)"""
+    return config is None or not config.has_credentials()
+
+def get_config_status_from_config(config: Optional[HGLocalizationConfig]) -> ConfigStatus:
+    """Get configuration status from HGLocalizationConfig object"""
+    if not config:
+        return ConfigStatus(
+            configured=False,
+            has_credentials=False,
+            bucket_name=None,
+            endpoint_url=None,
+            data_prefix=None
+        )
     
-    if app_config["aws_secret_access_key"]:
-        os.environ["HGLOC_AWS_SECRET_ACCESS_KEY"] = app_config["aws_secret_access_key"]
-    
-    if app_config["s3_data_prefix"]:
-        os.environ["HGLOC_S3_DATA_PREFIX"] = app_config["s3_data_prefix"]
+    return ConfigStatus(
+        configured=bool(config.s3_bucket_name),
+        has_credentials=config.has_credentials(),
+        bucket_name=config.s3_bucket_name,
+        endpoint_url=config.s3_endpoint_url,
+        data_prefix=config.s3_data_prefix
+    )
 
 # Configuration endpoints
 @app.post("/api/config", response_model=ConfigStatus)
-async def set_config(config: S3Config):
-    """Set S3 configuration"""
-    app_config["s3_bucket_name"] = config.s3_bucket_name
-    app_config["s3_endpoint_url"] = config.s3_endpoint_url
-    app_config["aws_access_key_id"] = config.aws_access_key_id
-    app_config["aws_secret_access_key"] = config.aws_secret_access_key
-    app_config["s3_data_prefix"] = config.s3_data_prefix or ""
-    app_config["has_credentials"] = bool(config.aws_access_key_id and config.aws_secret_access_key)
+async def set_config(config: S3Config, response: Response):
+    """Set S3 configuration via cookie"""
+    # Ensure credentials are None if not provided (for public access)
+    aws_access_key_id = config.aws_access_key_id if config.aws_access_key_id else None
+    aws_secret_access_key = config.aws_secret_access_key if config.aws_secret_access_key else None
     
-    # Update environment variables for hg_localization
-    update_environment_variables()
-    
-    # Reload the config module to pick up new environment variables
-    import importlib
-    import hg_localization.config
-    importlib.reload(hg_localization.config)
-    
-    return ConfigStatus(
-        configured=True,
-        has_credentials=app_config["has_credentials"],
-        bucket_name=app_config["s3_bucket_name"],
-        endpoint_url=app_config["s3_endpoint_url"],
-        data_prefix=app_config["s3_data_prefix"]
+    # Create a clean config for cookie storage
+    clean_config = S3Config(
+        s3_bucket_name=config.s3_bucket_name,
+        s3_endpoint_url=config.s3_endpoint_url,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        s3_data_prefix=config.s3_data_prefix
     )
+    
+    # Encode and set cookie
+    cookie_value = encode_config_cookie(clean_config)
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=cookie_value,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        secure=False,  # Set to True in production with HTTPS
+        samesite="lax"
+    )
+    
+    # Create HGLocalizationConfig for status response
+    hg_config = HGLocalizationConfig(
+        s3_bucket_name=clean_config.s3_bucket_name,
+        s3_endpoint_url=clean_config.s3_endpoint_url,
+        aws_access_key_id=clean_config.aws_access_key_id,
+        aws_secret_access_key=clean_config.aws_secret_access_key,
+        s3_data_prefix=clean_config.s3_data_prefix or ""
+    )
+    
+    return get_config_status_from_config(hg_config)
 
 @app.get("/api/config/status", response_model=ConfigStatus)
-async def get_config_status():
-    """Get current configuration status"""
-    return ConfigStatus(
-        configured=bool(app_config["s3_bucket_name"]),
-        has_credentials=app_config["has_credentials"],
-        bucket_name=app_config["s3_bucket_name"],
-        endpoint_url=app_config["s3_endpoint_url"],
-        data_prefix=app_config["s3_data_prefix"]
-    )
+async def get_config_status(request: Request):
+    """Get current configuration status from cookie"""
+    config = get_config_from_request(request)
+    return get_config_status_from_config(config)
 
 # Dataset endpoints
 @app.get("/api/datasets/cached", response_model=List[DatasetInfo])
-async def get_cached_datasets():
+async def get_cached_datasets(request: Request):
     """Get list of cached datasets"""
     try:
-        datasets = list_local_datasets()
+        config = get_config_from_request(request)
+        public_only = is_public_access_only(config)
+        datasets = list_local_datasets(config=config, public_access_only=public_only)
         return [
             DatasetInfo(
                 dataset_id=ds["dataset_id"],
@@ -213,13 +258,14 @@ async def get_cached_datasets():
         raise HTTPException(status_code=500, detail=f"Error listing cached datasets: {str(e)}")
 
 @app.get("/api/datasets/s3", response_model=List[DatasetInfo])
-async def get_s3_datasets():
+async def get_s3_datasets(request: Request):
     """Get list of S3 datasets"""
-    if not app_config["s3_bucket_name"]:
+    config = get_config_from_request(request)
+    if not config or not config.s3_bucket_name:
         raise HTTPException(status_code=400, detail="S3 bucket not configured")
     
     try:
-        datasets = list_s3_datasets()
+        datasets = list_s3_datasets(config=config)
         return [
             DatasetInfo(
                 dataset_id=ds["dataset_id"],
@@ -237,15 +283,49 @@ async def get_s3_datasets():
         raise HTTPException(status_code=500, detail=f"Error listing S3 datasets: {str(e)}")
 
 @app.get("/api/datasets/all", response_model=List[DatasetInfo])
-async def get_all_datasets():
+async def get_all_datasets(request: Request):
     """Get combined list of cached and S3 datasets"""
-    cached_datasets = await get_cached_datasets()
+    config = get_config_from_request(request)
     
+    # Get cached datasets
+    try:
+        public_only = is_public_access_only(config)
+        cached_datasets_raw = list_local_datasets(config=config, public_access_only=public_only)
+        cached_datasets = [
+            DatasetInfo(
+                dataset_id=ds["dataset_id"],
+                config_name=ds.get("config_name"),
+                revision=ds.get("revision"),
+                path=ds.get("path"),
+                has_card=ds.get("has_card", False),
+                source="cached",
+                is_cached=True,
+                available_s3=False
+            )
+            for ds in cached_datasets_raw
+        ]
+    except Exception:
+        cached_datasets = []
+    
+    # Get S3 datasets
     s3_datasets = []
-    if app_config["s3_bucket_name"]:
+    if config and config.s3_bucket_name:
         try:
-            s3_datasets = await get_s3_datasets()
-        except:
+            s3_datasets_raw = list_s3_datasets(config=config)
+            s3_datasets = [
+                DatasetInfo(
+                    dataset_id=ds["dataset_id"],
+                    config_name=ds.get("config_name"),
+                    revision=ds.get("revision"),
+                    s3_card_url=ds.get("s3_card_url"),
+                    has_card=bool(ds.get("s3_card_url")),
+                    source="s3",
+                    is_cached=False,
+                    available_s3=True
+                )
+                for ds in s3_datasets_raw
+            ]
+        except Exception:
             pass  # S3 might not be accessible
     
     # Combine and deduplicate
@@ -275,9 +355,11 @@ async def get_all_datasets():
     return list(all_datasets.values())
 
 @app.post("/api/datasets/cache")
-async def cache_dataset_endpoint(request: DatasetDownloadRequest, background_tasks: BackgroundTasks):
+async def cache_dataset_endpoint(request: DatasetDownloadRequest, background_tasks: BackgroundTasks, req: Request):
     """Cache a dataset on the server"""
-    if not app_config["s3_bucket_name"] and request.make_public:
+    config = get_config_from_request(req)
+    
+    if not config or (not config.s3_bucket_name and request.make_public):
         raise HTTPException(status_code=400, detail="S3 bucket required for making datasets public")
     
     async def cache_task():
@@ -289,7 +371,8 @@ async def cache_dataset_endpoint(request: DatasetDownloadRequest, background_tas
                 config_name=request.config_name,
                 revision=request.revision,
                 trust_remote_code=request.trust_remote_code,
-                make_public=request.make_public
+                make_public=request.make_public,
+                config=config
             )
             
             if success:
@@ -303,22 +386,32 @@ async def cache_dataset_endpoint(request: DatasetDownloadRequest, background_tas
     background_tasks.add_task(cache_task)
     return {"message": "Caching started", "dataset_id": request.dataset_id}
 
-@app.get("/api/datasets/{dataset_id}/download")
+@app.get("/api/datasets/{dataset_id:path}/download")
 async def download_dataset_zip(
     dataset_id: str,
     config_name: Optional[str] = None,
-    revision: Optional[str] = None
+    revision: Optional[str] = None,
+    request: Request = None
 ):
     """Download a dataset as a ZIP file to user's computer"""
     try:
+        config = get_config_from_request(request)
+        public_only = is_public_access_only(config)
+        
         # First ensure the dataset is cached locally
-        dataset = load_local_dataset(dataset_id, config_name, revision)
+        dataset = load_local_dataset(dataset_id, config_name, revision, config=config, public_access_only=public_only)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found in cache. Please cache it first.")
         
-        # Get the dataset path
+        # Get the dataset path - check both public and private paths if needed
         from hg_localization.dataset_manager import _get_dataset_path
-        dataset_path = _get_dataset_path(dataset_id, config_name, revision)
+        if public_only:
+            dataset_path = _get_dataset_path(dataset_id, config_name, revision, config=config, is_public=True)
+        else:
+            # Check public path first, then private
+            public_path = _get_dataset_path(dataset_id, config_name, revision, config=config, is_public=True)
+            private_path = _get_dataset_path(dataset_id, config_name, revision, config=config, is_public=False)
+            dataset_path = public_path if public_path.exists() else private_path
         
         if not dataset_path.exists():
             raise HTTPException(status_code=404, detail="Dataset files not found")
@@ -350,16 +443,19 @@ async def download_dataset_zip(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating dataset ZIP: {str(e)}")
 
-@app.get("/api/datasets/{dataset_id}/preview")
+@app.get("/api/datasets/{dataset_id:path}/preview")
 async def get_dataset_preview(
     dataset_id: str,
     config_name: Optional[str] = None,
     revision: Optional[str] = None,
-    max_samples: int = 5
+    max_samples: int = 5,
+    request: Request = None
 ):
     """Get dataset preview with sample data"""
     try:
-        dataset = load_local_dataset(dataset_id, config_name, revision)
+        config = get_config_from_request(request)
+        public_only = is_public_access_only(config)
+        dataset = load_local_dataset(dataset_id, config_name, revision, config=config, public_access_only=public_only)
         if not dataset:
             raise HTTPException(status_code=404, detail="Dataset not found locally")
         
@@ -388,16 +484,19 @@ async def get_dataset_preview(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error previewing dataset: {str(e)}")
 
-@app.get("/api/datasets/{dataset_id}/card")
+@app.get("/api/datasets/{dataset_id:path}/card")
 async def get_dataset_card(
     dataset_id: str,
     config_name: Optional[str] = None,
-    revision: Optional[str] = None
+    revision: Optional[str] = None,
+    request: Request = None
 ):
     """Get dataset card content"""
     try:
+        config = get_config_from_request(request)
+        
         # Try to get cached card first
-        card_content = get_cached_dataset_card_content(dataset_id, config_name, revision)
+        card_content = get_cached_dataset_card_content(dataset_id, config_name, revision, config=config)
         
         if not card_content:
             # Try to fetch from Hugging Face
@@ -410,7 +509,7 @@ async def get_dataset_card(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching dataset card: {str(e)}")
 
-@app.get("/api/datasets/{dataset_id}/examples", response_model=List[CodeExample])
+@app.get("/api/datasets/{dataset_id:path}/examples", response_model=List[CodeExample])
 async def get_dataset_examples(
     dataset_id: str,
     config_name: Optional[str] = None,

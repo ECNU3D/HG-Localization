@@ -19,24 +19,39 @@ from hg_localization.dataset_manager import (
     sync_local_dataset_to_s3, sync_all_local_to_s3
 )
 
-# Import relevant items from other modules that dataset_manager interacts with or uses for config
-from hg_localization.config import (
-    DATASETS_STORE_PATH, DEFAULT_CONFIG_NAME, DEFAULT_REVISION_NAME,
-    S3_BUCKET_NAME, S3_ENDPOINT_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-    PUBLIC_DATASETS_JSON_KEY, PUBLIC_DATASETS_ZIP_DIR_PREFIX, S3_DATA_PREFIX
-)
+# Import the new configuration system
+from hg_localization.config import HGLocalizationConfig, default_config
 # Mocks for hf_hub and datasets will be needed for many tests
 
 # --- Fixtures ---
 
 @pytest.fixture
 def temp_datasets_store(tmp_path, monkeypatch):
-    """Creates a temporary directory for DATASETS_STORE_PATH and patches the config."""
+    """Creates a temporary directory for datasets store and patches the config."""
     store_path = tmp_path / "test_datasets_store"
     store_path.mkdir()
-    monkeypatch.setattr('hg_localization.dataset_manager.DATASETS_STORE_PATH', store_path)
-    monkeypatch.setattr('hg_localization.config.DATASETS_STORE_PATH', store_path)
+    # Patch the default_config instance to use our temp path
+    monkeypatch.setattr(default_config, 'datasets_store_path', store_path)
     return store_path
+
+@pytest.fixture
+def test_config_dm(tmp_path):
+    """Create a test configuration for dataset manager tests."""
+    store_path = tmp_path / "test_dm_datasets_store"
+    store_path.mkdir()
+    
+    return HGLocalizationConfig(
+        s3_bucket_name="test-dm-bucket",
+        s3_endpoint_url="http://localhost:9000",
+        aws_access_key_id="test-dm-access-key",
+        aws_secret_access_key="test-dm-secret-key",
+        s3_data_prefix="test/dm/prefix",
+        datasets_store_path=store_path,
+        default_config_name="test_dm_config",
+        default_revision_name="test_dm_revision",
+        public_datasets_json_key="test_dm_public_datasets.json",
+        public_datasets_zip_dir_prefix="test_dm_public_datasets_zip"
+    )
 
 @pytest.fixture
 def mock_hf_datasets_apis(mocker):
@@ -73,8 +88,12 @@ def mock_s3_utils_for_dm(mocker):
     mock_s3_cli_instance = MagicMock()
     mock_get_s3_cli.return_value = mock_s3_cli_instance
     mock_get_s3_prefix_dm.return_value = "mocked/s3/prefix"
-    mock_get_prefixed_s3_key_dm.side_effect = lambda key: f"global_prefix/{key}"
-    mock_get_public_url.return_value = "https://mocked.public.url/dataset.zip"
+    def mock_get_prefixed_s3_key_side_effect(key, config=None):
+        return f"global_prefix/{key}"
+    mock_get_prefixed_s3_key_dm.side_effect = mock_get_prefixed_s3_key_side_effect
+    def mock_get_public_url_side_effect(bucket, key, endpoint=None):
+        return f"https://{bucket}.s3.amazonaws.com/{key}"
+    mock_get_public_url.side_effect = mock_get_public_url_side_effect
 
     return {
         "_get_s3_client": mock_get_s3_cli,
@@ -106,98 +125,99 @@ def mock_utils_for_dm(mocker):
 
 @pytest.fixture
 def mock_aws_creds_for_dm(monkeypatch):
-    """Monkeypatches AWS credentials for dataset_manager to enable S3 scan paths."""
-    monkeypatch.setattr('hg_localization.dataset_manager.AWS_ACCESS_KEY_ID', "test_access_key")
-    monkeypatch.setattr('hg_localization.dataset_manager.AWS_SECRET_ACCESS_KEY', "test_secret_key")
-    monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "test_access_key") # Also patch in config if direct import used there
-    monkeypatch.setattr('hg_localization.config.AWS_SECRET_ACCESS_KEY', "test_secret_key")
+    """Patches AWS credentials in default_config for dataset_manager tests."""
+    monkeypatch.setattr(default_config, 'aws_access_key_id', "test_access_key")
+    monkeypatch.setattr(default_config, 'aws_secret_access_key', "test_secret_key")
+    monkeypatch.setattr(default_config, 's3_bucket_name', "test-bucket")
 
 # --- Tests for _get_dataset_path (specific to dataset_manager) ---
 def test_dm_get_dataset_path(temp_datasets_store, mock_utils_for_dm):
     base_path = temp_datasets_store
-    path1 = _get_dataset_path("test/ds1")
-    assert path1 == base_path / "test_ds1" / DEFAULT_CONFIG_NAME / DEFAULT_REVISION_NAME
+    
+    # Test private path (default)
+    path1 = _get_dataset_path("test/ds1", config=default_config)
+    assert path1 == base_path / "test_ds1" / default_config.default_config_name / default_config.default_revision_name
+    
+    # Test public path
+    path2 = _get_dataset_path("test/ds1", config=default_config, is_public=True)
+    assert path2 == base_path / "public" / "test_ds1" / default_config.default_config_name / default_config.default_revision_name
+    
     mock_utils_for_dm["_get_safe_path_component"].assert_any_call("test/ds1")
 
 # --- Tests for _fetch_public_datasets_json_via_url ---
 
 @patch('hg_localization.dataset_manager.requests.get')
-def test_fetch_public_datasets_json_via_url_no_bucket_name(mock_requests_get, monkeypatch, capsys):
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', None)
-    result = _fetch_public_datasets_json_via_url()
+def test_fetch_public_datasets_json_via_url_no_bucket_name(mock_requests_get, capsys):
+    config = HGLocalizationConfig(s3_bucket_name=None)
+    result = _fetch_public_datasets_json_via_url(config=config)
     assert result is None
     captured = capsys.readouterr()
-    assert "S3_BUCKET_NAME not configured" in captured.out
+    assert "config.s3_bucket_name not configured" in captured.out
     mock_requests_get.assert_not_called()
 
 @patch('hg_localization.dataset_manager.requests.get')
-def test_fetch_public_datasets_json_via_url_http_error_not_404(mock_requests_get, mock_s3_utils_for_dm, monkeypatch, capsys):
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', "test-bucket")
-    mock_s3_utils_for_dm["_get_prefixed_s3_key"].return_value = PUBLIC_DATASETS_JSON_KEY
-    mock_s3_utils_for_dm["_get_s3_public_url"].return_value = "http://dummyurl.com/public_datasets.json"
+def test_fetch_public_datasets_json_via_url_http_error_not_404(mock_requests_get, mock_s3_utils_for_dm, capsys):
+    config = HGLocalizationConfig(s3_bucket_name="test-bucket")
+    expected_url = "https://test-bucket.s3.amazonaws.com/global_prefix/public_datasets.json"
     
     mock_response = MagicMock()
     mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("500 Server Error", response=MagicMock(status_code=500))
     mock_requests_get.return_value = mock_response
     
-    result = _fetch_public_datasets_json_via_url()
+    result = _fetch_public_datasets_json_via_url(config=config)
     assert result is None
     captured = capsys.readouterr()
-    assert "HTTP error fetching http://dummyurl.com/public_datasets.json: 500 Server Error" in captured.out
+    assert f"HTTP error fetching {expected_url}: 500 Server Error" in captured.out
     mock_requests_get.assert_called_once()
 
 @patch('hg_localization.dataset_manager.requests.get')
-def test_fetch_public_datasets_json_via_url_http_error_404(mock_requests_get, mock_s3_utils_for_dm, monkeypatch, capsys):
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', "test-bucket")
-    mock_s3_utils_for_dm["_get_prefixed_s3_key"].return_value = PUBLIC_DATASETS_JSON_KEY
-    mock_s3_utils_for_dm["_get_s3_public_url"].return_value = "http://dummyurl.com/public_datasets.json"
+def test_fetch_public_datasets_json_via_url_http_error_404(mock_requests_get, mock_s3_utils_for_dm, capsys):
+    config = HGLocalizationConfig(s3_bucket_name="test-bucket")
+    expected_url = "https://test-bucket.s3.amazonaws.com/global_prefix/public_datasets.json"
 
     mock_response = MagicMock()
     mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("404 Client Error", response=MagicMock(status_code=404))
     mock_requests_get.return_value = mock_response
 
-    result = _fetch_public_datasets_json_via_url()
+    result = _fetch_public_datasets_json_via_url(config=config)
     assert result is None
     captured = capsys.readouterr()
-    assert f"{PUBLIC_DATASETS_JSON_KEY} not found at the public URL" in captured.out
+    assert f"global_prefix/{config.public_datasets_json_key} not found at the public URL" in captured.out
     mock_requests_get.assert_called_once()
 
 @patch('hg_localization.dataset_manager.requests.get')
-def test_fetch_public_datasets_json_via_url_request_exception(mock_requests_get, mock_s3_utils_for_dm, monkeypatch, capsys):
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', "test-bucket")
-    mock_s3_utils_for_dm["_get_prefixed_s3_key"].return_value = PUBLIC_DATASETS_JSON_KEY
-    mock_s3_utils_for_dm["_get_s3_public_url"].return_value = "http://dummyurl.com/public_datasets.json"
+def test_fetch_public_datasets_json_via_url_request_exception(mock_requests_get, mock_s3_utils_for_dm, capsys):
+    config = HGLocalizationConfig(s3_bucket_name="test-bucket")
+    expected_url = "https://test-bucket.s3.amazonaws.com/global_prefix/public_datasets.json"
     
     mock_requests_get.side_effect = requests.exceptions.RequestException("Connection error")
     
-    result = _fetch_public_datasets_json_via_url()
+    result = _fetch_public_datasets_json_via_url(config=config)
     assert result is None
     captured = capsys.readouterr()
-    assert "Error fetching http://dummyurl.com/public_datasets.json: Connection error" in captured.out
+    assert f"Error fetching {expected_url}: Connection error" in captured.out
     mock_requests_get.assert_called_once()
 
 @patch('hg_localization.dataset_manager.requests.get')
-def test_fetch_public_datasets_json_via_url_json_decode_error(mock_requests_get, mock_s3_utils_for_dm, monkeypatch, capsys):
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', "test-bucket")
-    mock_s3_utils_for_dm["_get_prefixed_s3_key"].return_value = PUBLIC_DATASETS_JSON_KEY
-    mock_s3_utils_for_dm["_get_s3_public_url"].return_value = "http://dummyurl.com/public_datasets.json"
+def test_fetch_public_datasets_json_via_url_json_decode_error(mock_requests_get, mock_s3_utils_for_dm, capsys):
+    config = HGLocalizationConfig(s3_bucket_name="test-bucket")
+    expected_url = "https://test-bucket.s3.amazonaws.com/global_prefix/public_datasets.json"
 
     mock_response = MagicMock()
     mock_response.raise_for_status.return_value = None 
     mock_response.json.side_effect = json.JSONDecodeError("Expecting value", "doc", 0)
     mock_requests_get.return_value = mock_response
     
-    result = _fetch_public_datasets_json_via_url()
+    result = _fetch_public_datasets_json_via_url(config=config)
     assert result is None
     captured = capsys.readouterr()
-    assert "Error: Content at http://dummyurl.com/public_datasets.json is not valid JSON" in captured.out
+    assert f"Error: Content at {expected_url} is not valid JSON" in captured.out
     mock_requests_get.assert_called_once()
 
 @patch('hg_localization.dataset_manager.requests.get')
-def test_fetch_public_datasets_json_via_url_success(mock_requests_get, mock_s3_utils_for_dm, monkeypatch):
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', "test-bucket")
-    mock_s3_utils_for_dm["_get_prefixed_s3_key"].return_value = PUBLIC_DATASETS_JSON_KEY
-    mock_s3_utils_for_dm["_get_s3_public_url"].return_value = "http://dummyurl.com/public_datasets.json"
+def test_fetch_public_datasets_json_via_url_success(mock_requests_get, mock_s3_utils_for_dm):
+    config = HGLocalizationConfig(s3_bucket_name="test-bucket")
+    expected_url = "https://test-bucket.s3.amazonaws.com/global_prefix/public_datasets.json"
 
     expected_json = {"key": "value"}
     mock_response = MagicMock()
@@ -205,9 +225,9 @@ def test_fetch_public_datasets_json_via_url_success(mock_requests_get, mock_s3_u
     mock_response.json.return_value = expected_json
     mock_requests_get.return_value = mock_response
     
-    result = _fetch_public_datasets_json_via_url()
+    result = _fetch_public_datasets_json_via_url(config=config)
     assert result == expected_json
-    mock_requests_get.assert_called_once_with("http://dummyurl.com/public_datasets.json", timeout=10)
+    mock_requests_get.assert_called_once_with(expected_url, timeout=10)
 
 
 # --- Tests for _fetch_public_dataset_info ---
@@ -252,7 +272,7 @@ def test_fetch_public_dataset_info_success(mock_fetch_json_url):
     dataset_id = "my_dataset"
     config_name = "default"
     revision = None # Test with None revision
-    entry_key = f"{dataset_id}---{config_name}---{DEFAULT_REVISION_NAME}"
+    entry_key = f"{dataset_id}---{config_name}---{default_config.default_revision_name}"
     expected_info = {"s3_zip_key": "some/key.zip", "s3_bucket": "bucket-name"}
     public_json_content = {
         entry_key: expected_info
@@ -265,7 +285,7 @@ def test_fetch_public_dataset_info_success(mock_fetch_json_url):
 def test_fetch_public_dataset_info_success_with_default_names(mock_fetch_json_url):
     dataset_id = "my_dataset_defaults"
     # Test with None config_name and revision, expecting default names to be used in key
-    entry_key = f"{dataset_id}---{DEFAULT_CONFIG_NAME}---{DEFAULT_REVISION_NAME}"
+    entry_key = f"{dataset_id}---{default_config.default_config_name}---{default_config.default_revision_name}"
     expected_info = {"s3_zip_key": "defaults/key.zip", "s3_bucket": "bucket-defaults"}
     public_json_content = {
         entry_key: expected_info
@@ -314,13 +334,13 @@ def test_get_cached_dataset_card_content_local_exists(temp_datasets_store, mock_
 
     # Simulate _get_dataset_path behavior for structuring the path
     # _get_safe_path_component is already mocked by mock_utils_for_dm
-    ds_path = _get_dataset_path(dataset_id, config_name, revision) # Uses patched DATASETS_STORE_PATH
+    ds_path = _get_dataset_path(dataset_id, config_name, revision, config=default_config) # Uses patched DATASETS_STORE_PATH
     os.makedirs(ds_path, exist_ok=True)
     local_card_file = ds_path / "dataset_card.md"
     with open(local_card_file, "w", encoding="utf-8") as f:
         f.write(card_content)
 
-    retrieved_content = get_cached_dataset_card_content(dataset_id, config_name, revision)
+    retrieved_content = get_cached_dataset_card_content(dataset_id, config_name, revision, config=default_config)
     assert retrieved_content == card_content
     captured = capsys.readouterr()
     assert f"Found dataset card locally for (dataset: {dataset_id}, config: {config_name}, revision: {revision})" in captured.out
@@ -328,29 +348,34 @@ def test_get_cached_dataset_card_content_local_exists(temp_datasets_store, mock_
 @patch("builtins.open", side_effect=IOError("Read permission denied"))
 def test_get_cached_dataset_card_content_local_exists_read_error(mock_open, temp_datasets_store, mock_utils_for_dm, capsys):
     dataset_id = "local_card_io_error"
-    ds_path = _get_dataset_path(dataset_id)
+    ds_path = _get_dataset_path(dataset_id, config=default_config)
     os.makedirs(ds_path, exist_ok=True)
     (ds_path / "dataset_card.md").touch() # File exists
 
     # Ensure S3 utils are not called by making client None
     with patch('hg_localization.dataset_manager._get_s3_client') as mock_get_s3_cli:
         mock_get_s3_cli.return_value = None
-        retrieved_content = get_cached_dataset_card_content(dataset_id)
+        retrieved_content = get_cached_dataset_card_content(dataset_id, config=default_config)
         assert retrieved_content is None
         captured = capsys.readouterr()
         assert "Error reading local dataset card" in captured.out
         assert "Read permission denied" in captured.out
         mock_open.assert_called_once() # builtins.open was attempted
 
-def test_get_cached_dataset_card_content_s3_success(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys):
+def test_get_cached_dataset_card_content_s3_success(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, capsys):
     dataset_id = "s3_card_ds"
     config_name = "s3_cfg"
     revision = "s3_rev"
     s3_card_content = "S3 card data!"
-    s3_bucket_val = "my-card-bucket"
+    
+    # Create a test config with S3 bucket configured
+    test_config = HGLocalizationConfig(
+        s3_bucket_name="test-s3-bucket",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        datasets_store_path=temp_datasets_store
+    )
 
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
-    monkeypatch.setattr('hg_localization.config.S3_BUCKET_NAME', s3_bucket_val) 
     # Ensure S3 client is returned
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
@@ -358,48 +383,62 @@ def test_get_cached_dataset_card_content_s3_success(temp_datasets_store, mock_s3
     # This prefix is used to construct the s3_card_key
     expected_s3_card_key = "mocked/s3/prefix/dataset_card.md" 
 
-    ds_path = _get_dataset_path(dataset_id, config_name, revision)
+    ds_path = _get_dataset_path(dataset_id, config_name, revision, config=test_config)
     # local_card_file_path will be ds_path / "dataset_card.md"
 
     def mock_download_file(Bucket, Key, Filename):
-        assert Bucket == s3_bucket_val
+        assert Bucket == test_config.s3_bucket_name
         assert Key == expected_s3_card_key
         with open(Filename, "w", encoding="utf-8") as f:
             f.write(s3_card_content)
     mock_s3_utils_for_dm["s3_client_instance"].download_file.side_effect = mock_download_file
 
-    retrieved_content = get_cached_dataset_card_content(dataset_id, config_name, revision)
+    retrieved_content = get_cached_dataset_card_content(dataset_id, config_name, revision, config=test_config)
     assert retrieved_content == s3_card_content
     mock_s3_utils_for_dm["s3_client_instance"].download_file.assert_called_once()
     assert (ds_path / "dataset_card.md").exists()
     captured = capsys.readouterr()
-    assert f"Attempting to download dataset card from S3: s3://{s3_bucket_val}/{expected_s3_card_key}" in captured.out
+    assert f"Attempting to download dataset card from S3: s3://{test_config.s3_bucket_name}/{expected_s3_card_key}" in captured.out
     assert f"Successfully downloaded dataset card from S3 to {ds_path / 'dataset_card.md'}" in captured.out
 
-def test_get_cached_dataset_card_content_s3_client_error_404(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys):
+def test_get_cached_dataset_card_content_s3_client_error_404(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, capsys):
     dataset_id = "s3_card_404"
-    s3_bucket_val = "my-card-bucket-404"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    
+    # Create a test config with S3 bucket configured
+    test_config = HGLocalizationConfig(
+        s3_bucket_name="test-s3-bucket",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        datasets_store_path=temp_datasets_store
+    )
+    
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
     error_response = {'Error': {'Code': '404', 'Message': 'Not Found'}}
     mock_s3_utils_for_dm["s3_client_instance"].download_file.side_effect = ClientError(error_response, 'DownloadFile')
     
-    retrieved_content = get_cached_dataset_card_content(dataset_id)
+    retrieved_content = get_cached_dataset_card_content(dataset_id, config=test_config)
     assert retrieved_content is None
     captured = capsys.readouterr()
     assert "Dataset card not found on S3 at mocked/s3/prefix/dataset_card.md" in captured.out
 
-def test_get_cached_dataset_card_content_s3_client_error_other(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys):
+def test_get_cached_dataset_card_content_s3_client_error_other(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, capsys):
     dataset_id = "s3_card_other_error"
-    s3_bucket_val = "my-card-bucket-other"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    
+    # Create a test config with S3 bucket configured
+    test_config = HGLocalizationConfig(
+        s3_bucket_name="test-s3-bucket",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        datasets_store_path=temp_datasets_store
+    )
+    
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
     error_response = {'Error': {'Code': '500', 'Message': 'Server Error'}}
     mock_s3_utils_for_dm["s3_client_instance"].download_file.side_effect = ClientError(error_response, 'DownloadFile')
 
-    retrieved_content = get_cached_dataset_card_content(dataset_id)
+    retrieved_content = get_cached_dataset_card_content(dataset_id, config=test_config)
     assert retrieved_content is None
     captured = capsys.readouterr()
     assert "S3 ClientError when trying to download dataset card mocked/s3/prefix/dataset_card.md" in captured.out
@@ -407,8 +446,15 @@ def test_get_cached_dataset_card_content_s3_client_error_other(temp_datasets_sto
 @patch("builtins.open", side_effect=IOError("Post-download read error"))
 def test_get_cached_dataset_card_content_s3_download_io_error(mock_open_after_dl, temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys):
     dataset_id = "s3_card_dl_io_error"
-    s3_bucket_val = "my-card-bucket-dl-io"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    
+    # Create a test config with S3 bucket configured
+    test_config = HGLocalizationConfig(
+        s3_bucket_name="test-s3-bucket",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        datasets_store_path=temp_datasets_store
+    )
+    
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
 
     # Mock download_file to succeed (it creates the file marker)
@@ -417,7 +463,7 @@ def test_get_cached_dataset_card_content_s3_download_io_error(mock_open_after_dl
         Path(Filename).touch() 
     mock_s3_utils_for_dm["s3_client_instance"].download_file.side_effect = fake_download
 
-    retrieved_content = get_cached_dataset_card_content(dataset_id)
+    retrieved_content = get_cached_dataset_card_content(dataset_id, config=test_config)
     assert retrieved_content is None
     captured = capsys.readouterr()
     # The first open is for local check (fails), then S3 download happens, then second open for reading downloaded file (fails)
@@ -429,27 +475,36 @@ def test_get_cached_dataset_card_content_s3_not_configured(temp_datasets_store, 
     dataset_id = "no_s3_card_ds"
     # S3 client returns None, or S3_BUCKET_NAME is None
     mock_s3_utils_for_dm["_get_s3_client"].return_value = None
-    # Or, alternatively: monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', None)
+    # Or, alternatively: config = HGLocalizationConfig(s3_bucket_name=None)
 
-    retrieved_content = get_cached_dataset_card_content(dataset_id)
+    retrieved_content = get_cached_dataset_card_content(dataset_id, config=default_config)
     assert retrieved_content is None
     captured = capsys.readouterr()
     assert "S3 client not available or bucket not configured. Cannot fetch dataset card from S3." in captured.out
 
-def test_get_cached_dataset_card_content_not_found_anywhere(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys):
+def test_get_cached_dataset_card_content_not_found_anywhere(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, capsys):
     dataset_id = "card_never_found"
-    s3_bucket_val = "my-card-bucket-nf"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val)
+    config_name = "cfg_never"
+    revision = "rev_never"
+    
+    # Create a test config with S3 bucket configured
+    test_config = HGLocalizationConfig(
+        s3_bucket_name="test-s3-bucket",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        datasets_store_path=temp_datasets_store
+    )
+    
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
     # S3 download_file results in 404
     error_response = {'Error': {'Code': '404', 'Message': 'Not Found'}}
     mock_s3_utils_for_dm["s3_client_instance"].download_file.side_effect = ClientError(error_response, 'DownloadFile')
 
-    retrieved_content = get_cached_dataset_card_content(dataset_id)
+    retrieved_content = get_cached_dataset_card_content(dataset_id, config_name, revision, config=test_config)
     assert retrieved_content is None
     captured = capsys.readouterr()
-    assert "Dataset card not found or readable locally" in captured.out
+    assert f"Dataset card not found or readable locally for (dataset: {dataset_id}, config: {config_name}, revision: {revision})" in captured.out
     assert "Dataset card not found on S3" in captured.out
 
 
@@ -476,7 +531,7 @@ def test_download_dataset_new_full_spec(
         success, msg_path_str = download_dataset(
             dataset_id, config_name=config_name, revision=revision, 
             trust_remote_code=True, make_public=False, skip_s3_upload=True # Skip S3 for this basic test
-        )
+        , config=default_config)
 
         assert success is True
         expected_path = temp_datasets_store / "new_dataset" / "config1" / "v1.0"
@@ -500,20 +555,18 @@ def test_download_dataset_from_s3_success(
 ):
     dataset_id = "s3_ds_download"
     config_name = "s3_cfg"
-    s3_bucket_val = "my-s3-bucket-for-dm"
     
-    monkeypatch.setattr('hg_localization.config.S3_BUCKET_NAME', s3_bucket_val)
-    # Also patch it where dataset_manager imports it if direct import is used
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket_val) 
-    monkeypatch.setattr('hg_localization.config.AWS_ACCESS_KEY_ID', "dummy_key_dm")
-    monkeypatch.setattr('hg_localization.config.AWS_SECRET_ACCESS_KEY', "dummy_secret_dm")
-    # Ensure dataset_manager also sees dummy creds if it imports them directly
-    monkeypatch.setattr('hg_localization.dataset_manager.AWS_ACCESS_KEY_ID', "dummy_key_dm")
-    monkeypatch.setattr('hg_localization.dataset_manager.AWS_SECRET_ACCESS_KEY', "dummy_secret_dm")
+    # Create a test config with S3 bucket configured
+    test_config = HGLocalizationConfig(
+        s3_bucket_name="my-s3-bucket-for-dm",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        datasets_store_path=temp_datasets_store
+    )
 
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
     
-    local_save_path = _get_dataset_path(dataset_id, config_name) # Uses patched DATASETS_STORE_PATH
+    local_save_path = _get_dataset_path(dataset_id, config_name, config=test_config)
     
     def side_effect_s3_download(*args, **kwargs):
         dl_local_path = args[1] 
@@ -523,14 +576,14 @@ def test_download_dataset_from_s3_success(
     mock_s3_utils_for_dm["_download_directory_from_s3"].side_effect = side_effect_s3_download
     mock_get_card.return_value = None
 
-    success, msg_path = download_dataset(dataset_id, config_name=config_name)
+    success, msg_path = download_dataset(dataset_id, config_name=config_name, config=test_config)
 
     assert success is True
     assert Path(msg_path) == local_save_path
     mock_s3_utils_for_dm["_get_s3_client"].assert_called() 
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].assert_called_once() 
     mock_s3_utils_for_dm["_download_directory_from_s3"].assert_called_once_with(
-        mock_s3_utils_for_dm["_get_s3_client"].return_value, local_save_path, s3_bucket_val, "mocked/s3/prefix"
+        mock_s3_utils_for_dm["_get_s3_client"].return_value, local_save_path, test_config.s3_bucket_name, "mocked/s3/prefix"
     )
     mock_hf_datasets_apis["load_dataset"].assert_not_called()
     captured = capsys.readouterr()
@@ -544,12 +597,12 @@ def test_load_local_dataset_success_local_exists(
 ):
     dataset_id = "local_loader_test"
     config_name = "cfg_load"
-    dataset_path = _get_dataset_path(dataset_id, config_name=config_name) 
+    dataset_path = _get_dataset_path(dataset_id, config_name=config_name, config=default_config) 
     os.makedirs(dataset_path, exist_ok=True)
     (dataset_path / "dataset_info.json").touch()
 
     expected_data_obj = mock_hf_datasets_apis["data_loaded_from_disk"]
-    loaded_data = load_local_dataset(dataset_id, config_name=config_name)
+    loaded_data = load_local_dataset(dataset_id, config_name=config_name, config=default_config)
 
     assert loaded_data == expected_data_obj
     mock_hf_datasets_apis["load_from_disk"].assert_called_once_with(str(dataset_path))
@@ -563,21 +616,22 @@ def test_load_local_dataset_cache_miss_auth_s3_download_success(
     dataset_id = "auth_s3_ds"
     config_name = "main_config"
     revision = "v1.1"
-    s3_bucket_val = "my-auth-s3-bucket"
+    
+    # Create a test config with S3 bucket configured
+    test_config = HGLocalizationConfig(
+        s3_bucket_name="my-auth-s3-bucket",
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        datasets_store_path=temp_datasets_store
+    )
 
-    # Ensure local path does NOT exist initially
-    local_dataset_path = _get_dataset_path(dataset_id, config_name, revision)
-    assert not local_dataset_path.exists()
+    # Ensure local paths do NOT exist initially (both public and private)
+    private_dataset_path = _get_dataset_path(dataset_id, config_name, revision, config=test_config, is_public=False)
+    public_dataset_path = _get_dataset_path(dataset_id, config_name, revision, config=test_config, is_public=True)
+    assert not private_dataset_path.exists()
+    assert not public_dataset_path.exists()
 
     # Configure S3 credentials and bucket
-    monkeypatch.setattr("hg_localization.dataset_manager.AWS_ACCESS_KEY_ID", "test_key_id")
-    monkeypatch.setattr("hg_localization.dataset_manager.AWS_SECRET_ACCESS_KEY", "test_secret_key")
-    monkeypatch.setattr("hg_localization.dataset_manager.S3_BUCKET_NAME", s3_bucket_val)
-    # Also patch in config module directly for functions that might import from there
-    monkeypatch.setattr("hg_localization.config.AWS_ACCESS_KEY_ID", "test_key_id")
-    monkeypatch.setattr("hg_localization.config.AWS_SECRET_ACCESS_KEY", "test_secret_key")
-    monkeypatch.setattr("hg_localization.config.S3_BUCKET_NAME", s3_bucket_val)
-
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_get_s3_prefix"].return_value = f"s3_prefix_for_{dataset_id}"
 
@@ -589,42 +643,40 @@ def test_load_local_dataset_cache_miss_auth_s3_download_success(
     mock_s3_utils_for_dm["_download_directory_from_s3"].side_effect = mock_s3_download_success_effect
 
     expected_data_obj = mock_hf_datasets_apis["data_loaded_from_disk"]
-    loaded_data = load_local_dataset(dataset_id, config_name, revision)
+    loaded_data = load_local_dataset(dataset_id, config_name, revision, config=test_config)
 
     assert loaded_data == expected_data_obj
     mock_s3_utils_for_dm["_get_s3_client"].assert_called_once()
+    # The download should go to private path since this is authenticated S3 download
     mock_s3_utils_for_dm["_download_directory_from_s3"].assert_called_once_with(
         mock_s3_utils_for_dm["s3_client_instance"],
-        local_dataset_path,
-        s3_bucket_val,
+        private_dataset_path,
+        test_config.s3_bucket_name,
         f"s3_prefix_for_{dataset_id}"
     )
-    mock_hf_datasets_apis["load_from_disk"].assert_called_once_with(str(local_dataset_path))
+    mock_hf_datasets_apis["load_from_disk"].assert_called_once_with(str(private_dataset_path))
     
     captured = capsys.readouterr()
-    assert f"Dataset '{dataset_id}' (config: {config_name}, revision: {revision}) not found in local cache" in captured.out
+    version_str = f"(config: {config_name or test_config.default_config_name.replace('_',' ')}, revision: {revision or test_config.default_revision_name.replace('_',' ')})"
+    assert f"Dataset '{dataset_id}' {version_str} not found in local cache" in captured.out
     assert "Attempting to fetch from S3 using credentials..." in captured.out
-    assert f"Successfully downloaded from S3 (authenticated) to {local_dataset_path}" in captured.out
-    assert f"Loading dataset '{dataset_id}' (config: {config_name}, revision: {revision}) from {local_dataset_path}" in captured.out
+    assert f"Successfully downloaded from S3 (authenticated) to {private_dataset_path}" in captured.out
+    assert f"Loading dataset '{dataset_id}' {version_str} from {private_dataset_path}" in captured.out
 
 def test_load_local_dataset_cache_miss_auth_s3_fails_public_s3_fails(
     temp_datasets_store, mock_hf_datasets_apis, mock_s3_utils_for_dm, 
-    mock_utils_for_dm, monkeypatch, capsys
+    mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     dataset_id = "auth_s3_fail_public_fail_ds"
     config_name = "cfg_x"
     revision = "rev_y"
     s3_bucket_val = "my-auth-s3-fail-bucket"
 
-    local_dataset_path = _get_dataset_path(dataset_id, config_name, revision)
-    assert not local_dataset_path.exists()
-
-    monkeypatch.setattr("hg_localization.dataset_manager.AWS_ACCESS_KEY_ID", "key_for_fail")
-    monkeypatch.setattr("hg_localization.dataset_manager.AWS_SECRET_ACCESS_KEY", "secret_for_fail")
-    monkeypatch.setattr("hg_localization.dataset_manager.S3_BUCKET_NAME", s3_bucket_val)
-    monkeypatch.setattr("hg_localization.config.AWS_ACCESS_KEY_ID", "key_for_fail")
-    monkeypatch.setattr("hg_localization.config.AWS_SECRET_ACCESS_KEY", "secret_for_fail")
-    monkeypatch.setattr("hg_localization.config.S3_BUCKET_NAME", s3_bucket_val)
+    # Ensure local paths do NOT exist initially (both public and private)
+    private_dataset_path = _get_dataset_path(dataset_id, config_name, revision, config=default_config, is_public=False)
+    public_dataset_path = _get_dataset_path(dataset_id, config_name, revision, config=default_config, is_public=True)
+    assert not private_dataset_path.exists()
+    assert not public_dataset_path.exists()
 
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_get_s3_prefix"].return_value = f"s3_prefix_for_{dataset_id}_auth_fail"
@@ -634,19 +686,20 @@ def test_load_local_dataset_cache_miss_auth_s3_fails_public_s3_fails(
     with patch("hg_localization.dataset_manager._fetch_public_dataset_info") as mock_fetch_public_info:
         mock_fetch_public_info.return_value = None
 
-        loaded_data = load_local_dataset(dataset_id, config_name, revision)
+        loaded_data = load_local_dataset(dataset_id, config_name, revision, config=default_config)
 
         assert loaded_data is None
         mock_s3_utils_for_dm["_download_directory_from_s3"].assert_called_once()
-        mock_fetch_public_info.assert_called_once_with(dataset_id, config_name, revision)
+        mock_fetch_public_info.assert_called_once_with(dataset_id, config_name, revision, default_config)
         mock_hf_datasets_apis["load_from_disk"].assert_not_called()
 
         captured = capsys.readouterr()
-        assert f"Failed to download '{dataset_id}' (config: {config_name}, revision: {revision}) from S3 (authenticated) or not found." in captured.out
+        version_str = f"(config: {config_name or default_config.default_config_name.replace('_',' ')}, revision: {revision or default_config.default_revision_name.replace('_',' ')})"
+        assert f"Failed to download '{dataset_id}' {version_str} from S3 (authenticated) or not found." in captured.out
         assert "Attempting to fetch from public S3 dataset list via URL..." in captured.out
         # This next assertion depends on the exact wording when _fetch_public_dataset_info returns None and dataset is still not found
-        assert f"Dataset '{dataset_id}' (config: {config_name}, revision: {revision}) not found in public S3 dataset list or info was incomplete." in captured.out
-        assert f"Dataset '{dataset_id}' (config: {config_name}, revision: {revision}) could not be fetched from any source." in captured.out
+        assert f"Dataset '{dataset_id}' {version_str} not found in public S3 dataset list or info was incomplete." in captured.out
+        assert f"Dataset '{dataset_id}' {version_str} could not be fetched from any source." in captured.out
 
 @patch("requests.get")
 @patch("hg_localization.dataset_manager._fetch_public_dataset_info")
@@ -663,22 +716,26 @@ def test_load_local_dataset_cache_miss_no_auth_public_s3_success(
     # full_public_zip_s3_key will be formed by _get_prefixed_s3_key mock
     # public_zip_url will be formed by _get_s3_public_url mock
 
-    local_dataset_path = _get_dataset_path(dataset_id, config_name, revision)
-    assert not local_dataset_path.exists()
-
-    # Ensure no AWS credentials for authenticated S3 path
-    monkeypatch.setattr("hg_localization.dataset_manager.AWS_ACCESS_KEY_ID", None)
-    monkeypatch.setattr("hg_localization.config.AWS_ACCESS_KEY_ID", None)
-    # S3_BUCKET_NAME can be set for public URL construction, or it can come from public_info
-    # Let's assume S3_BUCKET_NAME is set and matches the one in public_info for simplicity here
-    monkeypatch.setattr("hg_localization.dataset_manager.S3_BUCKET_NAME", public_s3_bucket)
-    monkeypatch.setattr("hg_localization.config.S3_BUCKET_NAME", public_s3_bucket)
-    monkeypatch.setattr("hg_localization.dataset_manager.S3_ENDPOINT_URL", None) # Test with default endpoint for public URL
-    monkeypatch.setattr("hg_localization.config.S3_ENDPOINT_URL", None)
+    # Create a config without AWS credentials to simulate no auth scenario
+    no_auth_config = HGLocalizationConfig(
+        s3_bucket_name="zheyu-huggingface-test",
+        aws_access_key_id=None,
+        aws_secret_access_key=None,
+        s3_data_prefix="global_prefix",
+        public_datasets_json_key="public_datasets.json",
+        public_datasets_zip_dir_prefix="public_datasets_zip",
+        datasets_store_path=temp_datasets_store  # Use the temp path from fixture
+    )
+    
+    # For public downloads, the dataset should be saved to public path
+    public_dataset_path = _get_dataset_path(dataset_id, config_name, revision, config=no_auth_config, is_public=True)
+    private_dataset_path = _get_dataset_path(dataset_id, config_name, revision, config=no_auth_config, is_public=False)
+    assert not public_dataset_path.exists()
+    assert not private_dataset_path.exists()
 
     # Mock _fetch_public_dataset_info to return success
     mock_fetch_public_info.return_value = {
-        "s3_zip_key": public_zip_key, # This is relative to S3_DATA_PREFIX or root
+        "s3_zip_key": public_zip_key, # This is relative to default_config.s3_data_prefix or root
         "s3_bucket": public_s3_bucket
     }
     
@@ -694,7 +751,7 @@ def test_load_local_dataset_cache_miss_no_auth_public_s3_success(
 
     # The URL that _get_s3_public_url mock should return to the code under test
     # This URL should be constructed with the key that _get_s3_public_url will actually receive.
-    expected_public_zip_url = f"https://{public_s3_bucket}.s3.amazonaws.com/{actual_key_that_will_be_passed_to_get_s3_public_url}"
+    expected_public_zip_url = f"https://{no_auth_config.s3_bucket_name}.s3.amazonaws.com/{actual_key_that_will_be_passed_to_get_s3_public_url}"
     mock_s3_utils_for_dm["_get_s3_public_url"].return_value = expected_public_zip_url
 
     # We don't need to modify mock_s3_utils_for_dm["_get_prefixed_s3_key"] here;
@@ -715,7 +772,7 @@ def test_load_local_dataset_cache_miss_no_auth_public_s3_success(
     mock_utils_for_dm["_unzip_file"].side_effect = mock_unzip_success_effect
 
     expected_data_obj = mock_hf_datasets_apis["data_loaded_from_disk"]
-    loaded_data = load_local_dataset(dataset_id, config_name, revision)
+    loaded_data = load_local_dataset(dataset_id, config_name, revision, config=no_auth_config)
 
     assert loaded_data == expected_data_obj
     # Assertions for S3 client / S3 download should ensure they are NOT called if no auth creds
@@ -727,24 +784,24 @@ def test_load_local_dataset_cache_miss_no_auth_public_s3_success(
     # The important thing is _download_directory_from_s3 is not called.
     mock_s3_utils_for_dm["_download_directory_from_s3"].assert_not_called()
 
-    mock_fetch_public_info.assert_called_once_with(dataset_id, config_name, revision)
+    mock_fetch_public_info.assert_called_once_with(dataset_id, config_name, revision, no_auth_config)
     # The key passed to _get_s3_public_url is the *full* key after _get_prefixed_s3_key mock (from fixture) runs.
     # The S3_ENDPOINT_URL passed to _get_s3_public_url within load_local_dataset is the one from hg_localization.dataset_manager.S3_ENDPOINT_URL
     mock_s3_utils_for_dm["_get_s3_public_url"].assert_called_once_with(
-        public_s3_bucket, 
+        no_auth_config.s3_bucket_name,  # The code uses the configured bucket name, not the one from public info
         actual_key_that_will_be_passed_to_get_s3_public_url, 
         current_s3_endpoint_url
     )
     mock_requests_get.assert_called_once_with(expected_public_zip_url, stream=True, timeout=300)
-    mock_utils_for_dm["_unzip_file"].assert_called_once_with(ANY, local_dataset_path) # ANY for temp zip path
-    mock_hf_datasets_apis["load_from_disk"].assert_called_once_with(str(local_dataset_path))
+    mock_utils_for_dm["_unzip_file"].assert_called_once_with(ANY, public_dataset_path) # ANY for temp zip path, public path for target
+    mock_hf_datasets_apis["load_from_disk"].assert_called_once_with(str(public_dataset_path))
 
     captured = capsys.readouterr()
     assert "Attempting to fetch from S3 using credentials..." not in captured.out # Ensure auth path was skipped
     assert "Attempting to fetch from public S3 dataset list via URL..." in captured.out
     assert f"Public dataset zip found. Attempting download from: {expected_public_zip_url}" in captured.out
     assert "Public zip downloaded to" in captured.out
-    assert f"Successfully downloaded and unzipped public dataset to {local_dataset_path}" in captured.out
+    assert f"Successfully downloaded and unzipped public dataset to {public_dataset_path}" in captured.out
 
 
 # --- Tests for upload_dataset ---
@@ -762,7 +819,7 @@ def test_upload_dataset_local_save_failure(
     dataset_id = "upload_fail_local"
     mock_dataset_obj.save_to_disk.side_effect = Exception("Disk full!")
 
-    success = upload_dataset(mock_dataset_obj, dataset_id)
+    success = upload_dataset(mock_dataset_obj, dataset_id, config=default_config)
 
     assert success is False
     mock_dataset_obj.save_to_disk.assert_called_once()
@@ -777,10 +834,10 @@ def test_upload_dataset_s3_not_configured(
 ):
     dataset_id = "upload_no_s3_config"
     # Simulate S3 not configured
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', None)
+    config = HGLocalizationConfig(s3_bucket_name=None)
     mock_s3_utils_for_dm["_get_s3_client"].return_value = None # Or s3_client is None
 
-    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True) # make_public should be skipped
+    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True, config=default_config) # make_public should be skipped
 
     assert success is True # True because local save succeeded
     mock_dataset_obj.save_to_disk.assert_called_once()
@@ -789,7 +846,7 @@ def test_upload_dataset_s3_not_configured(
     mock_utils_for_dm["_zip_directory"].assert_not_called() # make_public part skipped
     
     captured = capsys.readouterr()
-    expected_local_path = _get_dataset_path(dataset_id) # Get expected path
+    expected_local_path = _get_dataset_path(dataset_id, config=default_config) # Get expected path
     assert f"Dataset '{dataset_id}' (config: default, revision: default) successfully saved to local cache: {expected_local_path}" in captured.out
     assert "S3 not configured or client init failed; skipping S3 upload." in captured.out
     assert "Cannot make dataset public as S3 is not configured." in captured.out # Because make_public was True
@@ -802,18 +859,24 @@ def test_upload_dataset_s3_upload_success_no_make_public(
     config_name = "cfg_up"
     s3_bucket = "my-upload-bucket"
     
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
-    monkeypatch.setattr('hg_localization.config.S3_BUCKET_NAME', s3_bucket)
+    # Create test config with the expected bucket name
+    test_config = HGLocalizationConfig(
+        s3_bucket_name=s3_bucket,
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        datasets_store_path=temp_datasets_store
+    )
+    
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_upload_directory_to_s3"].return_value = True # Simulate success
 
-    success = upload_dataset(mock_dataset_obj, dataset_id, config_name=config_name, make_public=False)
+    success = upload_dataset(mock_dataset_obj, dataset_id, config_name=config_name, make_public=False, config=test_config)
 
     assert success is True
-    local_save_path = _get_dataset_path(dataset_id, config_name)
+    local_save_path = _get_dataset_path(dataset_id, config_name, config=test_config)
     mock_dataset_obj.save_to_disk.assert_called_once_with(str(local_save_path))
     mock_s3_utils_for_dm["_get_s3_client"].assert_called()
-    mock_s3_utils_for_dm["_get_s3_prefix"].assert_called_with(dataset_id, config_name, ANY)
+    mock_s3_utils_for_dm["_get_s3_prefix"].assert_called_with(dataset_id, config_name, ANY, test_config)
     mock_s3_utils_for_dm["_upload_directory_to_s3"].assert_called_once_with(
         mock_s3_utils_for_dm["s3_client_instance"],
         local_save_path,
@@ -828,16 +891,16 @@ def test_upload_dataset_s3_upload_success_no_make_public(
 
 def test_upload_dataset_s3_upload_failure_no_make_public(
     temp_datasets_store, mock_dataset_obj, mock_s3_utils_for_dm, 
-    mock_utils_for_dm, monkeypatch, capsys
+    mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     dataset_id = "upload_s3_fail"
     s3_bucket = "my-upload-fail-bucket"
     
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_upload_directory_to_s3"].side_effect = Exception("S3 Connection Error")
 
-    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=False)
+    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=False, config=default_config)
 
     assert success is False # False because S3 upload failed (after local save succeeded)
     mock_dataset_obj.save_to_disk.assert_called_once()
@@ -858,11 +921,13 @@ def test_upload_dataset_make_public_success(
     revision = "v_pub"
     s3_bucket = "my-public-upload-bucket"
     
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
-    monkeypatch.setattr('hg_localization.config.S3_BUCKET_NAME', s3_bucket)
-    monkeypatch.setattr('hg_localization.dataset_manager.PUBLIC_DATASETS_ZIP_DIR_PREFIX', "public_zips_test")
-    monkeypatch.setattr('hg_localization.config.PUBLIC_DATASETS_ZIP_DIR_PREFIX', "public_zips_test")
-
+    # Create test config with the expected bucket name
+    test_config = HGLocalizationConfig(
+        s3_bucket_name=s3_bucket,
+        aws_access_key_id="test-key",
+        aws_secret_access_key="test-secret",
+        datasets_store_path=temp_datasets_store
+    )
 
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_upload_directory_to_s3"].return_value = True # Private upload success
@@ -875,10 +940,10 @@ def test_upload_dataset_make_public_success(
     mock_tempfile_named.return_value.__enter__.return_value = mock_tmp_file_obj
 
 
-    success = upload_dataset(mock_dataset_obj, dataset_id, config_name=config_name, revision=revision, make_public=True)
+    success = upload_dataset(mock_dataset_obj, dataset_id, config_name=config_name, revision=revision, make_public=True, config=test_config)
 
     assert success is True
-    local_save_path = _get_dataset_path(dataset_id, config_name, revision)
+    local_save_path = _get_dataset_path(dataset_id, config_name, revision, config=test_config)
     mock_dataset_obj.save_to_disk.assert_called_once_with(str(local_save_path))
     mock_s3_utils_for_dm["_upload_directory_to_s3"].assert_called_once() # Private upload
     
@@ -893,7 +958,7 @@ def test_upload_dataset_make_public_success(
     safe_rev = mock_utils_for_dm["_get_safe_path_component"](revision)
     
     expected_zip_filename = f"{safe_ds_id}---{safe_cfg}---{safe_rev}.zip"
-    expected_base_s3_zip_key = f"public_zips_test/{expected_zip_filename}"
+    expected_base_s3_zip_key = f"{test_config.public_datasets_zip_dir_prefix}/{expected_zip_filename}"
     # mock_s3_utils_for_dm["_get_prefixed_s3_key"] side_effect: lambda key: f"global_prefix/{key}"
     expected_s3_zip_key_full = f"global_prefix/{expected_base_s3_zip_key}"
 
@@ -906,7 +971,7 @@ def test_upload_dataset_make_public_success(
     mock_s3_utils_for_dm["_update_public_datasets_json"].assert_called_once_with(
         mock_s3_utils_for_dm["s3_client_instance"],
         s3_bucket,
-        dataset_id, config_name, revision, expected_base_s3_zip_key
+        dataset_id, config_name, revision, expected_base_s3_zip_key, test_config
     )
 
     captured = capsys.readouterr()
@@ -919,11 +984,11 @@ def test_upload_dataset_make_public_success(
 def test_upload_dataset_make_public_zip_failure(
     mock_shutil_copytree, mock_tempfile_named,
     temp_datasets_store, mock_dataset_obj, mock_s3_utils_for_dm, 
-    mock_utils_for_dm, monkeypatch, capsys
+    mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     dataset_id = "upload_public_zip_fail"
     s3_bucket = "my-public-zip-fail-bucket"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_upload_directory_to_s3"].return_value = True # Private upload success
@@ -933,7 +998,7 @@ def test_upload_dataset_make_public_zip_failure(
     mock_tmp_file_obj.name = str(temp_datasets_store / "temp_dataset_zip_fail.zip")
     mock_tempfile_named.return_value.__enter__.return_value = mock_tmp_file_obj
 
-    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True)
+    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True, config=default_config)
     
     assert success is True # Still true as private upload (if configured and successful) or local save succeeded
     mock_dataset_obj.save_to_disk.assert_called_once()
@@ -949,11 +1014,11 @@ def test_upload_dataset_make_public_zip_failure(
 def test_upload_dataset_make_public_s3_public_upload_failure(
     mock_shutil_copytree, mock_tempfile_named,
     temp_datasets_store, mock_dataset_obj, mock_s3_utils_for_dm, 
-    mock_utils_for_dm, monkeypatch, capsys
+    mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     dataset_id = "upload_public_s3_fail"
     s3_bucket = "my-public_s3_fail-bucket"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
 
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_upload_directory_to_s3"].return_value = True
@@ -964,7 +1029,7 @@ def test_upload_dataset_make_public_s3_public_upload_failure(
     mock_tmp_file_obj.name = str(temp_datasets_store / "temp_dataset_public_s3_fail.zip")
     mock_tempfile_named.return_value.__enter__.return_value = mock_tmp_file_obj
 
-    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True)
+    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True, config=default_config)
 
     assert success is True # Still true
     mock_s3_utils_for_dm["s3_client_instance"].upload_file.assert_called_once() # Attempted public upload
@@ -978,11 +1043,11 @@ def test_upload_dataset_make_public_s3_public_upload_failure(
 def test_upload_dataset_make_public_update_json_failure(
     mock_shutil_copytree, mock_tempfile_named,
     temp_datasets_store, mock_dataset_obj, mock_s3_utils_for_dm, 
-    mock_utils_for_dm, monkeypatch, capsys
+    mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     dataset_id = "upload_public_json_fail"
     s3_bucket = "my-public-json-fail-bucket"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
 
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_upload_directory_to_s3"].return_value = True
@@ -994,7 +1059,7 @@ def test_upload_dataset_make_public_update_json_failure(
     mock_tmp_file_obj.name = str(temp_datasets_store / "temp_dataset_json_fail.zip")
     mock_tempfile_named.return_value.__enter__.return_value = mock_tmp_file_obj
 
-    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True)
+    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True, config=default_config)
 
     assert success is True # Still true
     mock_s3_utils_for_dm["s3_client_instance"].upload_file.assert_called_once() # Public upload happened
@@ -1010,7 +1075,7 @@ def test_upload_dataset_make_public_update_json_failure(
 
 def test_list_local_datasets_empty_store(temp_datasets_store, capsys):
     """Test list_local_datasets with an empty DATASETS_STORE_PATH."""
-    datasets = list_local_datasets()
+    datasets = list_local_datasets(config=default_config)
     assert datasets == []
     captured = capsys.readouterr()
     assert "No local datasets found" in captured.out
@@ -1019,9 +1084,10 @@ def test_list_local_datasets_store_does_not_exist(temp_datasets_store, monkeypat
     """Test list_local_datasets when DATASETS_STORE_PATH does not exist."""
     # Simulate store path not existing by pointing to a non-existent subdir
     non_existent_store = temp_datasets_store / "non_existent"
-    monkeypatch.setattr('hg_localization.dataset_manager.DATASETS_STORE_PATH', non_existent_store)
+    # Create a config with the non-existent store path
+    config = HGLocalizationConfig(datasets_store_path=non_existent_store)
     
-    datasets = list_local_datasets()
+    datasets = list_local_datasets(config=config)
     assert datasets == []
     captured = capsys.readouterr()
     assert f"Local dataset store directory does not exist: {non_existent_store}" in captured.out
@@ -1036,9 +1102,9 @@ def test_list_local_datasets_with_non_dataset_files_and_dirs(temp_datasets_store
     os.makedirs(ds_path, exist_ok=True)
     (ds_path / "dataset_info.json").touch() # Marker file
 
-    datasets = list_local_datasets()
+    datasets = list_local_datasets(config=default_config)
     assert len(datasets) == 1
-    assert datasets[0]["dataset_id"] == "my_dataset_id"
+    assert datasets[0]["dataset_id"] == "my_dataset/id"
     
     captured = capsys.readouterr()
     # Ensure no errors about the extra file/dir, just the found dataset
@@ -1051,7 +1117,7 @@ def test_list_local_datasets_various_structures(temp_datasets_store, mock_utils_
     # Dataset 1: default config and revision
     ds1_id_original = "user/dataset1"
     ds1_id_safe = mock_utils_for_dm["_get_safe_path_component"](ds1_id_original)
-    ds1_path = temp_datasets_store / ds1_id_safe / DEFAULT_CONFIG_NAME / DEFAULT_REVISION_NAME
+    ds1_path = temp_datasets_store / ds1_id_safe / default_config.default_config_name / default_config.default_revision_name
     os.makedirs(ds1_path, exist_ok=True)
     (ds1_path / "dataset_info.json").touch()
     (ds1_path / "dataset_card.md").write_text("Card for DS1")
@@ -1061,7 +1127,7 @@ def test_list_local_datasets_various_structures(temp_datasets_store, mock_utils_
     ds2_id_safe = mock_utils_for_dm["_get_safe_path_component"](ds2_id_original)
     ds2_config = "custom_cfg"
     ds2_config_safe = mock_utils_for_dm["_get_safe_path_component"](ds2_config)
-    ds2_path = temp_datasets_store / ds2_id_safe / ds2_config_safe / DEFAULT_REVISION_NAME
+    ds2_path = temp_datasets_store / ds2_id_safe / ds2_config_safe / default_config.default_revision_name
     os.makedirs(ds2_path, exist_ok=True)
     (ds2_path / "dataset_info.json").touch()
 
@@ -1085,35 +1151,35 @@ def test_list_local_datasets_various_structures(temp_datasets_store, mock_utils_
     (temp_datasets_store / "partial_dataset" / "config_only").mkdir(parents=True)
 
 
-    datasets = list_local_datasets()
+    datasets = list_local_datasets(config=default_config)
     assert len(datasets) == 3
     
     # Sort by dataset_id for consistent checking
     datasets_sorted = sorted(datasets, key=lambda d: d["dataset_id"])
 
-    assert datasets_sorted[0]["dataset_id"] == ds3_id_safe # another/dataset3 -> another_dataset3
+    assert datasets_sorted[0]["dataset_id"] == ds3_id_original # another/dataset3 (restored from another_dataset3)
     assert datasets_sorted[0]["config_name"] == ds3_config
     assert datasets_sorted[0]["revision"] == ds3_revision
     assert datasets_sorted[0]["path"] == str(ds3_path)
     assert datasets_sorted[0]["has_card"] is True
 
-    assert datasets_sorted[1]["dataset_id"] == ds2_id_safe # dataset2 -> dataset2
+    assert datasets_sorted[1]["dataset_id"] == ds2_id_original # dataset2 (no change, no underscore)
     assert datasets_sorted[1]["config_name"] == ds2_config
-    assert datasets_sorted[1]["revision"] == None # Was DEFAULT_REVISION_NAME, function returns None
+    assert datasets_sorted[1]["revision"] == None # Was default_config.default_revision_name, function returns None
     assert datasets_sorted[1]["path"] == str(ds2_path)
     assert datasets_sorted[1]["has_card"] is False
 
-    assert datasets_sorted[2]["dataset_id"] == ds1_id_safe # user/dataset1 -> user_dataset1
-    assert datasets_sorted[2]["config_name"] == None # Was DEFAULT_CONFIG_NAME, function returns None
-    assert datasets_sorted[2]["revision"] == None # Was DEFAULT_REVISION_NAME, function returns None
+    assert datasets_sorted[2]["dataset_id"] == ds1_id_original # user/dataset1 (restored from user_dataset1)
+    assert datasets_sorted[2]["config_name"] == None # Was default_config.default_config_name, function returns None
+    assert datasets_sorted[2]["revision"] == None # Was default_config.default_revision_name, function returns None
     assert datasets_sorted[2]["path"] == str(ds1_path)
     assert datasets_sorted[2]["has_card"] is True
     
     captured = capsys.readouterr()
-    assert f"Dataset ID: {ds1_id_safe}, Config: None, Revision: None" in captured.out
+    assert f"Dataset ID: {ds1_id_original}, Config: None, Revision: None" in captured.out
     assert f"Path: {ds1_path}" in captured.out
     assert "Card: Yes" in captured.out
-    assert f"Dataset ID: {ds2_id_safe}, Config: {ds2_config}, Revision: None" in captured.out
+    assert f"Dataset ID: {ds2_id_original}, Config: {ds2_config}, Revision: None" in captured.out
     assert "Card: No" in captured.out
     assert "Found 3 local dataset(s):" in captured.out
     # Ensure the non-dataset dirs are not listed as errors, just ignored.
@@ -1142,9 +1208,9 @@ def test_list_local_datasets_invalid_subdirs(temp_datasets_store, mock_utils_for
     (config_dir_for_rev_file / "revision_as_file.json").touch()
 
 
-    datasets = list_local_datasets()
+    datasets = list_local_datasets(config=default_config)
     assert len(datasets) == 1
-    assert datasets[0]["dataset_id"] == ds1_id
+    assert datasets[0]["dataset_id"] == "valid/ds"
     
     captured = capsys.readouterr()
     # The function does print "Found X local dataset(s):"
@@ -1154,20 +1220,19 @@ def test_list_local_datasets_invalid_subdirs(temp_datasets_store, mock_utils_for
 
 # --- Tests for list_s3_datasets ---
 
-def test_list_s3_datasets_not_configured(mock_s3_utils_for_dm, monkeypatch, capsys):
+def test_list_s3_datasets_not_configured(mock_s3_utils_for_dm, capsys):
     """Test list_s3_datasets when S3 is not configured."""
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', None)
-    # OR mock_s3_utils_for_dm["_get_s3_client"].return_value = None
-    datasets = list_s3_datasets()
+    config = HGLocalizationConfig(s3_bucket_name=None)
+    datasets = list_s3_datasets(config=config)
     assert datasets == []
     captured = capsys.readouterr()
-    assert "S3_BUCKET_NAME not configured. Cannot list S3 datasets." in captured.out
+    assert "config.s3_bucket_name not configured. Cannot list S3 datasets." in captured.out
 
 @patch('hg_localization.dataset_manager._fetch_public_datasets_json_via_url')
 def test_list_s3_datasets_empty_bucket(mock_fetch_public_json, mock_s3_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm):
     """Test list_s3_datasets with an empty S3 bucket (no dataset prefixes)."""
     s3_bucket = "empty-s3-bucket"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
     # s3_client_instance.get_paginator('list_objects_v2') will return a mock paginator
@@ -1178,33 +1243,33 @@ def test_list_s3_datasets_empty_bucket(mock_fetch_public_json, mock_s3_utils_for
     # Prevent fallback to public URL listing for this test
     mock_fetch_public_json.return_value = None 
     
-    datasets = list_s3_datasets()
+    datasets = list_s3_datasets(config=default_config)
     assert datasets == []
     captured = capsys.readouterr()
     # Check for the message indicating no datasets found after scanning and failing/skipping public list
-    assert f"No datasets found in S3 bucket '{s3_bucket}' by scanning or from public list." in captured.out
+    assert f"No datasets found in S3 bucket '{default_config.s3_bucket_name}' by scanning or from public list." in captured.out
     
     # The actual prefix used by list_s3_datasets for the initial scan.
-    # S3_DATA_PREFIX defaults to ""
-    expected_scan_prefix = S3_DATA_PREFIX.strip('/') + '/' if S3_DATA_PREFIX else ""
+    # default_config.s3_data_prefix defaults to ""
+    expected_scan_prefix = default_config.s3_data_prefix.strip('/') + '/' if default_config.s3_data_prefix else ""
 
     # We assert that paginate was called on the mock_paginator
     mock_s3_utils_for_dm["s3_client_instance"].get_paginator.assert_called_once_with('list_objects_v2')
     mock_paginator.paginate.assert_called_once_with(
-        Bucket=s3_bucket, Prefix=expected_scan_prefix, Delimiter='/'
+        Bucket=default_config.s3_bucket_name, Prefix=expected_scan_prefix, Delimiter='/'
     )
 
 @patch('hg_localization.dataset_manager._fetch_public_datasets_json_via_url')
 def test_list_s3_datasets_various_structures(mock_fetch_public_json, mock_utils_for_dm, mock_s3_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm):
     """Test list_s3_datasets with various valid dataset structures on S3."""
     s3_bucket = "populated-s3-bucket"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
 
     # _get_prefixed_s3_key mock from fixture: lambda key: f"global_prefix/{key}"
     # Base prefix for datasets in S3 - this is what list_s3_datasets uses for its initial scan.
-    # scan_base_prefix = S3_DATA_PREFIX.strip('/') + '/' if S3_DATA_PREFIX else ""
-    scan_base_prefix = S3_DATA_PREFIX.strip('/') + '/' if S3_DATA_PREFIX else ""
+    # scan_base_prefix = default_config.s3_data_prefix.strip('/') + '/' if default_config.s3_data_prefix else ""
+    scan_base_prefix = default_config.s3_data_prefix.strip('/') + '/' if default_config.s3_data_prefix else ""
     base_s3_data_prefix = scan_base_prefix
 
     # Get the mock function for _get_safe_path_component from the fixture dictionary
@@ -1215,13 +1280,13 @@ def test_list_s3_datasets_various_structures(mock_fetch_public_json, mock_utils_
     ds1_cfg_orig = "default_cfg_s3"
     ds1_rev_orig = "main_s3"
 
-    ds2_id_orig = "dataset2_s3"
+    ds2_id_orig = "microsoft/dataset2"
     ds2_cfg_orig = "custom_s3"
     ds2_rev_orig = "v1.0_s3"
 
-    ds3_id_orig = "org/data/dataset3_s3"
-    ds3_cfg_orig = DEFAULT_CONFIG_NAME # Test default config name
-    ds3_rev_orig = DEFAULT_REVISION_NAME # Test default revision name
+    ds3_id_orig = "huggingface/dataset3"
+    ds3_cfg_orig = default_config.default_config_name # Test default config name
+    ds3_rev_orig = default_config.default_revision_name # Test default revision name
 
     # Expected sanitized dataset IDs (what the function will actually return)
     ds1_id_safe = get_safe_path_mock(ds1_id_orig)
@@ -1270,7 +1335,7 @@ def test_list_s3_datasets_various_structures(mock_fetch_public_json, mock_utils_
 
     # Mock paginator behavior - the paginate method returns an iterator of pages
     def mock_paginate_side_effect(Bucket, Prefix, Delimiter):
-        assert Bucket == s3_bucket
+        assert Bucket == default_config.s3_bucket_name
         assert Delimiter == '/'
         if Prefix == base_s3_data_prefix:
             return iter([list_level1_response])
@@ -1317,24 +1382,24 @@ def test_list_s3_datasets_various_structures(mock_fetch_public_json, mock_utils_
     # mock_get_presigned_url_direct.side_effect = lambda s3_cli, bucket, ds_id, cfg, rev: f"presigned_url_for_{ds_id}_{cfg}_{rev}" # REMOVE THIS LINE
 
 
-    datasets = list_s3_datasets() # Removed include_card_urls=True, verbose=True
+    datasets = list_s3_datasets(config=default_config) # Removed include_card_urls=True, verbose=True
     assert len(datasets) == 3
     datasets_sorted = sorted(datasets, key=lambda d: d["dataset_id"])
 
-    # DS2 assertions (dataset2_s3) - first alphabetically
-    assert datasets_sorted[0]["dataset_id"] == ds2_id_safe
-    assert datasets_sorted[0]["config_name"] == ds2_cfg_orig
-    assert datasets_sorted[0]["revision"] == ds2_rev_orig
-    assert datasets_sorted[0]["s3_card_url"] == f"presigned_url_for_{ds2_id_safe}_{ds2_cfg_orig}_{ds2_rev_orig}"
+    # DS3 assertions (huggingface/dataset3) - first alphabetically
+    assert datasets_sorted[0]["dataset_id"] == ds3_id_orig  # Restored from safe name
+    assert datasets_sorted[0]["config_name"] == None # default config becomes None
+    assert datasets_sorted[0]["revision"] == None # default revision becomes None
+    assert datasets_sorted[0]["s3_card_url"] == f"presigned_url_for_{ds3_id_safe}_{ds3_cfg_orig}_{ds3_rev_orig}"
 
-    # DS3 assertions (org/data/dataset3_s3) - second alphabetically
-    assert datasets_sorted[1]["dataset_id"] == ds3_id_safe
-    assert datasets_sorted[1]["config_name"] == None # default config becomes None
-    assert datasets_sorted[1]["revision"] == None # default revision becomes None
-    assert datasets_sorted[1]["s3_card_url"] == f"presigned_url_for_{ds3_id_safe}_{ds3_cfg_orig}_{ds3_rev_orig}"
+    # DS2 assertions (microsoft/dataset2) - second alphabetically
+    assert datasets_sorted[1]["dataset_id"] == ds2_id_orig  # Restored from safe name
+    assert datasets_sorted[1]["config_name"] == ds2_cfg_orig
+    assert datasets_sorted[1]["revision"] == ds2_rev_orig
+    assert datasets_sorted[1]["s3_card_url"] == f"presigned_url_for_{ds2_id_safe}_{ds2_cfg_orig}_{ds2_rev_orig}"
 
     # DS1 assertions (user/dataset1-s3) - third alphabetically
-    assert datasets_sorted[2]["dataset_id"] == ds1_id_safe
+    assert datasets_sorted[2]["dataset_id"] == ds1_id_orig  # Restored from safe name
     assert datasets_sorted[2]["config_name"] == ds1_cfg_orig
     assert datasets_sorted[2]["revision"] == ds1_rev_orig
     assert datasets_sorted[2]["s3_card_url"] == f"presigned_url_for_{ds1_id_safe}_{ds1_cfg_orig}_{ds1_rev_orig}"
@@ -1363,7 +1428,7 @@ def test_list_s3_datasets_various_structures(mock_fetch_public_json, mock_utils_
 @patch('hg_localization.dataset_manager._fetch_public_datasets_json_via_url')
 def test_list_s3_datasets_client_error_on_list(mock_fetch_public_json, mock_s3_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm):
     s3_bucket = "error-s3-bucket"
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
     simulated_error_message = "Simulated Access Denied by Test"
@@ -1375,7 +1440,7 @@ def test_list_s3_datasets_client_error_on_list(mock_fetch_public_json, mock_s3_u
         'ListObjectsV2' # Operation name for the ClientError
     )
 
-    datasets = list_s3_datasets()
+    datasets = list_s3_datasets(config=default_config)
     assert datasets == []
     captured = capsys.readouterr()
     
@@ -1388,7 +1453,7 @@ def test_list_s3_datasets_client_error_on_list(mock_fetch_public_json, mock_s3_u
     assert simulated_error_message in captured.out # The specific message from the ClientError
     # Check for the fallback messages
     assert "Falling back to check public list if applicable." in captured.out
-    assert f"No datasets found in S3 bucket '{s3_bucket}' by scanning or from public list." in captured.out
+    assert f"No datasets found in S3 bucket '{default_config.s3_bucket_name}' by scanning or from public list." in captured.out
 
 # --- Tests for sync_local_dataset_to_s3 ---
 
@@ -1398,29 +1463,29 @@ def test_sync_local_dataset_to_s3_local_not_found(temp_datasets_store, mock_s3_u
     config_name = "test_config"
     revision = "v1.0"
     
-    success, message = sync_local_dataset_to_s3(dataset_id, config_name, revision)
+    success, message = sync_local_dataset_to_s3(dataset_id, config_name, revision, config=default_config)
     
     assert success is False
-    expected_path = _get_dataset_path(dataset_id, config_name, revision)
+    expected_path = _get_dataset_path(dataset_id, config_name, revision, config=default_config)
     assert f"Local dataset {dataset_id} (config: {config_name}, revision: {revision}) not found or is incomplete at {expected_path}" in message
     mock_s3_utils_for_dm["_get_s3_client"].assert_not_called()
     captured = capsys.readouterr()
     assert "Cannot sync." in captured.out
 
-def test_sync_local_dataset_to_s3_s3_not_configured(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys):
+def test_sync_local_dataset_to_s3_s3_not_configured(temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, capsys):
     """Test sync_local_dataset_to_s3 when S3 is not configured."""
     dataset_id = "test_dataset"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id)
+    local_path = _get_dataset_path(dataset_id, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Mock S3 not configured
     mock_s3_utils_for_dm["_get_s3_client"].return_value = None
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', None)
+    config = HGLocalizationConfig(s3_bucket_name=None)
     
-    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True, config=default_config)
     
     assert success is False
     assert "S3 not configured" in message
@@ -1429,7 +1494,7 @@ def test_sync_local_dataset_to_s3_s3_not_configured(temp_datasets_store, mock_s3
     assert "S3 not configured" in captured.out
 
 def test_sync_local_dataset_to_s3_already_exists_no_make_public(
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 when dataset already exists on S3 and make_public=False."""
     dataset_id = "existing_dataset"
@@ -1437,16 +1502,16 @@ def test_sync_local_dataset_to_s3_already_exists_no_make_public(
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id, config_name)
+    local_path = _get_dataset_path(dataset_id, config_name, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
     
-    success, message = sync_local_dataset_to_s3(dataset_id, config_name, make_public=False)
+    success, message = sync_local_dataset_to_s3(dataset_id, config_name, make_public=False, config=default_config)
     
     assert success is True
     assert "completed" in message
@@ -1457,7 +1522,7 @@ def test_sync_local_dataset_to_s3_already_exists_no_make_public(
     assert "already exists as private S3 copy" in captured.out
 
 def test_sync_local_dataset_to_s3_upload_new_dataset_success(
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 when uploading a new dataset successfully."""
     dataset_id = "new_dataset"
@@ -1465,17 +1530,17 @@ def test_sync_local_dataset_to_s3_upload_new_dataset_success(
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id, revision=revision)
+    local_path = _get_dataset_path(dataset_id, revision=revision, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_dict.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = False
     mock_s3_utils_for_dm["_upload_directory_to_s3"].return_value = True
     
-    success, message = sync_local_dataset_to_s3(dataset_id, revision=revision)
+    success, message = sync_local_dataset_to_s3(dataset_id, revision=revision, config=default_config)
     
     assert success is True
     assert "completed" in message
@@ -1483,7 +1548,7 @@ def test_sync_local_dataset_to_s3_upload_new_dataset_success(
     mock_s3_utils_for_dm["_upload_directory_to_s3"].assert_called_once_with(
         mock_s3_utils_for_dm["s3_client_instance"],
         local_path,
-        s3_bucket,
+        default_config.s3_bucket_name,
         mock_s3_utils_for_dm["_get_s3_prefix"].return_value
     )
     captured = capsys.readouterr()
@@ -1491,24 +1556,24 @@ def test_sync_local_dataset_to_s3_upload_new_dataset_success(
     assert "Successfully uploaded dataset" in captured.out
 
 def test_sync_local_dataset_to_s3_upload_failure(
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 when S3 upload fails."""
     dataset_id = "upload_fail_dataset"
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id)
+    local_path = _get_dataset_path(dataset_id, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = False
     mock_s3_utils_for_dm["_upload_directory_to_s3"].side_effect = Exception("S3 upload failed")
     
-    success, message = sync_local_dataset_to_s3(dataset_id)
+    success, message = sync_local_dataset_to_s3(dataset_id, config=default_config)
     
     assert success is False
     assert "Error uploading dataset" in message
@@ -1517,7 +1582,7 @@ def test_sync_local_dataset_to_s3_upload_failure(
     assert "Error uploading dataset" in captured.out
 
 def test_sync_local_dataset_to_s3_make_public_zip_already_exists(
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 with make_public=True when public zip already exists."""
     dataset_id = "public_existing_dataset"
@@ -1525,12 +1590,12 @@ def test_sync_local_dataset_to_s3_make_public_zip_already_exists(
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id, config_name)
+    local_path = _get_dataset_path(dataset_id, config_name, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
     mock_s3_utils_for_dm["_update_public_datasets_json"].return_value = True
@@ -1538,7 +1603,7 @@ def test_sync_local_dataset_to_s3_make_public_zip_already_exists(
     # Mock head_object to simulate existing public zip
     mock_s3_utils_for_dm["s3_client_instance"].head_object.return_value = {}
     
-    success, message = sync_local_dataset_to_s3(dataset_id, config_name, make_public=True)
+    success, message = sync_local_dataset_to_s3(dataset_id, config_name, make_public=True, config=default_config)
     
     assert success is True
     mock_s3_utils_for_dm["s3_client_instance"].head_object.assert_called_once()
@@ -1554,20 +1619,20 @@ def test_sync_local_dataset_to_s3_make_public_zip_already_exists(
 @patch('shutil.copytree')
 def test_sync_local_dataset_to_s3_make_public_create_new_zip_success(
     mock_copytree, mock_tempfile_named, mock_temp_dir,
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 with make_public=True creating new public zip successfully."""
     dataset_id = "public_new_dataset"
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id)
+    local_path = _get_dataset_path(dataset_id, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
-    monkeypatch.setattr('hg_localization.dataset_manager.PUBLIC_DATASETS_ZIP_DIR_PREFIX', "public_zips")
+    # Updated to use config object instead of monkeypatch
+    # Removed PUBLIC_DATASETS_ZIP_DIR_PREFIX monkeypatch - using config object instead
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
     mock_s3_utils_for_dm["_update_public_datasets_json"].return_value = True
@@ -1586,7 +1651,7 @@ def test_sync_local_dataset_to_s3_make_public_create_new_zip_success(
     mock_temp_file.name = str(temp_datasets_store / "temp.zip")
     mock_tempfile_named.return_value.__enter__.return_value = mock_temp_file
     
-    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True, config=default_config)
     
     assert success is True
     mock_s3_utils_for_dm["s3_client_instance"].head_object.assert_called_once()
@@ -1604,19 +1669,19 @@ def test_sync_local_dataset_to_s3_make_public_create_new_zip_success(
 @patch('shutil.copytree')
 def test_sync_local_dataset_to_s3_make_public_zip_creation_fails(
     mock_copytree, mock_tempfile_named, mock_temp_dir,
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 with make_public=True when zip creation fails."""
     dataset_id = "public_zip_fail_dataset"
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id)
+    local_path = _get_dataset_path(dataset_id, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
     mock_utils_for_dm["_zip_directory"].return_value = False  # Zip creation fails
@@ -1634,7 +1699,7 @@ def test_sync_local_dataset_to_s3_make_public_zip_creation_fails(
     mock_temp_file.name = str(temp_datasets_store / "temp.zip")
     mock_tempfile_named.return_value.__enter__.return_value = mock_temp_file
     
-    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True, config=default_config)
     
     assert success is True  # Still succeeds because private upload worked
     mock_utils_for_dm["_zip_directory"].assert_called_once()
@@ -1649,19 +1714,19 @@ def test_sync_local_dataset_to_s3_make_public_zip_creation_fails(
 @patch('shutil.copytree')
 def test_sync_local_dataset_to_s3_make_public_upload_fails(
     mock_copytree, mock_tempfile_named, mock_temp_dir,
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 with make_public=True when public zip upload fails."""
     dataset_id = "public_upload_fail_dataset"
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id)
+    local_path = _get_dataset_path(dataset_id, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
     mock_utils_for_dm["_zip_directory"].return_value = True
@@ -1682,7 +1747,7 @@ def test_sync_local_dataset_to_s3_make_public_upload_fails(
     mock_temp_file.name = str(temp_datasets_store / "temp.zip")
     mock_tempfile_named.return_value.__enter__.return_value = mock_temp_file
     
-    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True, config=default_config)
     
     assert success is True  # Still succeeds because private upload worked
     mock_utils_for_dm["_zip_directory"].assert_called_once()
@@ -1693,19 +1758,19 @@ def test_sync_local_dataset_to_s3_make_public_upload_fails(
     assert "Upload failed" in captured.out
 
 def test_sync_local_dataset_to_s3_make_public_head_object_error(
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 with make_public=True when head_object returns non-404 error."""
     dataset_id = "public_head_error_dataset"
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id)
+    local_path = _get_dataset_path(dataset_id, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
     
@@ -1713,7 +1778,7 @@ def test_sync_local_dataset_to_s3_make_public_head_object_error(
     error_response = {'Error': {'Code': 'AccessDenied', 'Message': 'Access Denied'}}
     mock_s3_utils_for_dm["s3_client_instance"].head_object.side_effect = ClientError(error_response, 'HeadObject')
     
-    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True, config=default_config)
     
     assert success is True  # Still succeeds because private upload worked
     mock_s3_utils_for_dm["s3_client_instance"].head_object.assert_called_once()
@@ -1724,24 +1789,24 @@ def test_sync_local_dataset_to_s3_make_public_head_object_error(
     assert "Skipping make_public actions" in captured.out
 
 def test_sync_local_dataset_to_s3_make_public_without_private_copy(
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 with make_public=True when private S3 copy doesn't exist and upload fails."""
     dataset_id = "public_no_private_dataset"
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id)
+    local_path = _get_dataset_path(dataset_id, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = False
     mock_s3_utils_for_dm["_upload_directory_to_s3"].side_effect = Exception("Upload failed")
     
-    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True, config=default_config)
     
     assert success is False
     assert "Error uploading dataset" in message
@@ -1750,19 +1815,19 @@ def test_sync_local_dataset_to_s3_make_public_without_private_copy(
     # Should not reach make_public logic since private upload failed
 
 def test_sync_local_dataset_to_s3_make_public_json_update_fails(
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_local_dataset_to_s3 with make_public=True when JSON manifest update fails."""
     dataset_id = "public_json_fail_dataset"
     s3_bucket = "test-bucket"
     
     # Create a valid local dataset
-    local_path = _get_dataset_path(dataset_id)
+    local_path = _get_dataset_path(dataset_id, config=default_config)
     os.makedirs(local_path, exist_ok=True)
     (local_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
     mock_s3_utils_for_dm["_update_public_datasets_json"].return_value = False  # Update fails
@@ -1770,7 +1835,7 @@ def test_sync_local_dataset_to_s3_make_public_json_update_fails(
     # Mock head_object to simulate existing public zip
     mock_s3_utils_for_dm["s3_client_instance"].head_object.return_value = {}
     
-    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True)
+    success, message = sync_local_dataset_to_s3(dataset_id, make_public=True, config=default_config)
     
     assert success is True  # Still succeeds overall
     mock_s3_utils_for_dm["_update_public_datasets_json"].assert_called_once()
@@ -1781,24 +1846,24 @@ def test_sync_local_dataset_to_s3_make_public_json_update_fails(
 
 def test_sync_all_local_to_s3_no_local_datasets(temp_datasets_store, capsys):
     """Test sync_all_local_to_s3 when no local datasets exist."""
-    sync_all_local_to_s3(make_public=False)
+    sync_all_local_to_s3(make_public=False, config=default_config)
     
     captured = capsys.readouterr()
     assert "Starting sync of all local datasets to S3. Make public: False" in captured.out
     assert "No local datasets found in cache to sync." in captured.out
 
-def test_sync_all_local_to_s3_s3_not_configured(temp_datasets_store, mock_s3_utils_for_dm, monkeypatch, capsys):
+def test_sync_all_local_to_s3_s3_not_configured(temp_datasets_store, mock_s3_utils_for_dm, capsys):
     """Test sync_all_local_to_s3 when S3 is not configured."""
     # Create a local dataset
-    dataset_path = _get_dataset_path("test_dataset")
+    dataset_path = _get_dataset_path("test_dataset", config=default_config)
     os.makedirs(dataset_path, exist_ok=True)
     (dataset_path / "dataset_info.json").touch()
     
     # Mock S3 not configured
     mock_s3_utils_for_dm["_get_s3_client"].return_value = None
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', None)
+    config = HGLocalizationConfig(s3_bucket_name=None)
     
-    sync_all_local_to_s3(make_public=True)
+    sync_all_local_to_s3(make_public=True, config=default_config)
     
     captured = capsys.readouterr()
     assert "S3 not configured (bucket name or client init failed). Cannot sync any datasets to S3." in captured.out
@@ -1806,7 +1871,7 @@ def test_sync_all_local_to_s3_s3_not_configured(temp_datasets_store, mock_s3_uti
 
 @patch('hg_localization.dataset_manager.sync_local_dataset_to_s3')
 def test_sync_all_local_to_s3_all_success(
-    mock_sync_single, temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    mock_sync_single, temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_all_local_to_s3 when all datasets sync successfully."""
     s3_bucket = "test-bucket"
@@ -1819,25 +1884,25 @@ def test_sync_all_local_to_s3_all_success(
     ]
     
     for ds_id, config, revision in datasets_info:
-        dataset_path = _get_dataset_path(ds_id, config, revision)
+        dataset_path = _get_dataset_path(ds_id, config, revision, config=default_config)
         os.makedirs(dataset_path, exist_ok=True)
         (dataset_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
     # Mock sync_local_dataset_to_s3 to always succeed
     mock_sync_single.return_value = (True, "Success message")
     
-    sync_all_local_to_s3(make_public=True)
+    sync_all_local_to_s3(make_public=True, config=default_config)
     
     # Verify sync_local_dataset_to_s3 was called for each dataset
     assert mock_sync_single.call_count == 3
     expected_calls = [
-        call("dataset1", None, None, make_public=True),
-        call("dataset2", "config1", None, make_public=True),
-        call("dataset3", "config2", "v1.0", make_public=True)
+        call("dataset1", None, None, make_public=True, config=default_config),
+        call("dataset2", "config1", None, make_public=True, config=default_config),
+        call("dataset3", "config2", "v1.0", make_public=True, config=default_config)
     ]
     mock_sync_single.assert_has_calls(expected_calls, any_order=True)
     
@@ -1850,7 +1915,7 @@ def test_sync_all_local_to_s3_all_success(
 
 @patch('hg_localization.dataset_manager.sync_local_dataset_to_s3')
 def test_sync_all_local_to_s3_mixed_results(
-    mock_sync_single, temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    mock_sync_single, temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_all_local_to_s3 when some datasets succeed and some fail."""
     s3_bucket = "test-bucket"
@@ -1864,16 +1929,16 @@ def test_sync_all_local_to_s3_mixed_results(
     ]
     
     for ds_id, config, revision in datasets_info:
-        dataset_path = _get_dataset_path(ds_id, config, revision)
+        dataset_path = _get_dataset_path(ds_id, config, revision, config=default_config)
         os.makedirs(dataset_path, exist_ok=True)
         (dataset_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
     # Mock sync_local_dataset_to_s3 to succeed for some, fail for others
-    def mock_sync_side_effect(dataset_id, config_name, revision, make_public):
+    def mock_sync_side_effect(dataset_id, config_name, revision, make_public, config=None):
         if "fail" in dataset_id:
             return (False, f"Failed to sync {dataset_id}")
         else:
@@ -1881,7 +1946,7 @@ def test_sync_all_local_to_s3_mixed_results(
     
     mock_sync_single.side_effect = mock_sync_side_effect
     
-    sync_all_local_to_s3(make_public=False)
+    sync_all_local_to_s3(make_public=False, config=default_config)
     
     # Verify sync_local_dataset_to_s3 was called for each dataset
     assert mock_sync_single.call_count == 4
@@ -1891,24 +1956,24 @@ def test_sync_all_local_to_s3_mixed_results(
     assert "Total local datasets processed: 4" in captured.out
     assert "Successfully processed (primary sync action): 2" in captured.out
     assert "Failed to process (see logs for errors): 2" in captured.out
-    assert "Processing local dataset for sync: ID='success_dataset1'" in captured.out
-    assert "Processing local dataset for sync: ID='fail_dataset'" in captured.out
+    assert "Processing local dataset for sync: ID='success/dataset1'" in captured.out
+    assert "Processing local dataset for sync: ID='fail/dataset'" in captured.out
 
 @patch('hg_localization.dataset_manager.sync_local_dataset_to_s3')
 def test_sync_all_local_to_s3_all_fail(
-    mock_sync_single, temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    mock_sync_single, temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_all_local_to_s3 when all datasets fail to sync."""
     s3_bucket = "test-bucket"
     
     # Create local datasets
     for i in range(2):
-        dataset_path = _get_dataset_path(f"dataset{i}")
+        dataset_path = _get_dataset_path(f"dataset{i}", config=default_config)
         os.makedirs(dataset_path, exist_ok=True)
         (dataset_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
     # Mock sync_local_dataset_to_s3 to always fail
@@ -1925,32 +1990,32 @@ def test_sync_all_local_to_s3_all_fail(
 
 @patch('hg_localization.dataset_manager.sync_local_dataset_to_s3')
 def test_sync_all_local_to_s3_with_various_dataset_structures(
-    mock_sync_single, temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    mock_sync_single, temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test sync_all_local_to_s3 with datasets having various config/revision combinations."""
     s3_bucket = "test-bucket"
     
     # Create datasets with different structures
     datasets_info = [
-        ("ds_default_default", DEFAULT_CONFIG_NAME, DEFAULT_REVISION_NAME),
-        ("ds_custom_default", "custom_config", DEFAULT_REVISION_NAME),
-        ("ds_default_custom", DEFAULT_CONFIG_NAME, "custom_revision"),
+        ("ds_default_default", default_config.default_config_name, default_config.default_revision_name),
+        ("ds_custom_default", "custom_config", default_config.default_revision_name),
+        ("ds_default_custom", default_config.default_config_name, "custom_revision"),
         ("ds_custom_custom", "custom_config", "custom_revision")
     ]
     
     for ds_id, config, revision in datasets_info:
-        dataset_path = _get_dataset_path(ds_id, config, revision)
+        dataset_path = _get_dataset_path(ds_id, config, revision, config=default_config)
         os.makedirs(dataset_path, exist_ok=True)
         (dataset_path / "dataset_dict.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     
     # Mock sync_local_dataset_to_s3 to always succeed
     mock_sync_single.return_value = (True, "Success")
     
-    sync_all_local_to_s3(make_public=True)
+    sync_all_local_to_s3(make_public=True, config=default_config)
     
     assert mock_sync_single.call_count == 4
     
@@ -1958,12 +2023,12 @@ def test_sync_all_local_to_s3_with_various_dataset_structures(
     calls = mock_sync_single.call_args_list
     call_args = [(call[0][0], call[0][1], call[0][2]) for call in calls]
     
-    # list_local_datasets returns None for default config/revision names
+    # list_local_datasets returns None for default config/revision names and restored dataset names
     expected_calls = [
-        ("ds_default_default", None, None),
-        ("ds_custom_default", "custom_config", None),
-        ("ds_default_custom", None, "custom_revision"),
-        ("ds_custom_custom", "custom_config", "custom_revision")
+        ("ds_default/default", None, None),
+        ("ds_custom/default", "custom_config", None),
+        ("ds_default/custom", None, "custom_revision"),
+        ("ds_custom/custom", "custom_config", "custom_revision")
     ]
     
     for expected_call in expected_calls:
@@ -1974,24 +2039,163 @@ def test_sync_all_local_to_s3_with_various_dataset_structures(
     assert "Successfully processed (primary sync action): 4" in captured.out
 
 def test_sync_all_local_to_s3_verbose_output_format(
-    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys
+    temp_datasets_store, mock_s3_utils_for_dm, mock_utils_for_dm, monkeypatch, capsys, mock_aws_creds_for_dm
 ):
     """Test that sync_all_local_to_s3 produces the expected verbose output format."""
     s3_bucket = "test-bucket"
     
     # Create a local dataset
-    dataset_path = _get_dataset_path("test_dataset", "test_config", "test_revision")
+    dataset_path = _get_dataset_path("test_dataset", "test_config", "test_revision", config=default_config)
     os.makedirs(dataset_path, exist_ok=True)
     (dataset_path / "dataset_info.json").touch()
     
     # Configure S3
-    monkeypatch.setattr('hg_localization.dataset_manager.S3_BUCKET_NAME', s3_bucket)
+    # Updated to use config object instead of monkeypatch
     mock_s3_utils_for_dm["_get_s3_client"].return_value = mock_s3_utils_for_dm["s3_client_instance"]
     mock_s3_utils_for_dm["_check_s3_dataset_exists"].return_value = True
     
-    sync_all_local_to_s3(make_public=False)
+    sync_all_local_to_s3(make_public=False, config=default_config)
     
     captured = capsys.readouterr()
     # Check for the specific formatting with escaped newlines
-    assert "\\n--- Processing local dataset for sync: ID='test_dataset', Config='test_config', Revision='test_revision' ---" in captured.out
+    assert "\\n--- Processing local dataset for sync: ID='test/dataset', Config='test_config', Revision='test_revision' ---" in captured.out
     assert "\\n--- Sync all local datasets to S3 finished ---" in captured.out
+
+# --- Additional tests for public/private cache regression prevention ---
+
+def test_download_dataset_force_public_cache_with_existing_private(
+    temp_datasets_store, mock_hf_datasets_apis, mock_s3_utils_for_dm, 
+    mock_utils_for_dm, monkeypatch, capsys
+):
+    """Test that force_public_cache=True bypasses existing private dataset."""
+    dataset_id = "test/dataset"
+    
+    # Create existing private dataset
+    private_path = _get_dataset_path(dataset_id, config=default_config, is_public=False)
+    os.makedirs(private_path, exist_ok=True)
+    (private_path / "dataset_info.json").touch()
+    
+    # Ensure public path doesn't exist
+    public_path = _get_dataset_path(dataset_id, config=default_config, is_public=True)
+    assert not public_path.exists()
+    
+    # Mock S3 not configured to force HF download
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = None
+    
+    # Call download_dataset with force_public_cache=True
+    success, result_path = download_dataset(
+        dataset_id=dataset_id,
+        force_public_cache=True,
+        config=default_config
+    )
+    
+    # Should succeed and return public path
+    assert success
+    assert str(public_path) == result_path
+    
+    # Should have called HF download despite private dataset existing
+    mock_hf_datasets_apis["load_dataset"].assert_called_once()
+    mock_hf_datasets_apis["returned_dataset_instance"].save_to_disk.assert_called_once_with(str(public_path))
+    
+    captured = capsys.readouterr()
+    assert "Downloading dataset" in captured.out
+    assert "from Hugging Face" in captured.out
+
+def test_download_dataset_make_public_with_existing_private(
+    temp_datasets_store, mock_hf_datasets_apis, mock_s3_utils_for_dm, 
+    mock_utils_for_dm, monkeypatch, capsys
+):
+    """Test that make_public=True bypasses existing private dataset."""
+    dataset_id = "test/dataset"
+    
+    # Create existing private dataset
+    private_path = _get_dataset_path(dataset_id, config=default_config, is_public=False)
+    os.makedirs(private_path, exist_ok=True)
+    (private_path / "dataset_info.json").touch()
+    
+    # Ensure public path doesn't exist
+    public_path = _get_dataset_path(dataset_id, config=default_config, is_public=True)
+    assert not public_path.exists()
+    
+    # Mock S3 not configured to force HF download
+    mock_s3_utils_for_dm["_get_s3_client"].return_value = None
+    
+    # Call download_dataset with make_public=True
+    success, result_path = download_dataset(
+        dataset_id=dataset_id,
+        make_public=True,
+        config=default_config
+    )
+    
+    # Should succeed and return public path
+    assert success
+    assert str(public_path) == result_path
+    
+    # Should have called HF download despite private dataset existing
+    mock_hf_datasets_apis["load_dataset"].assert_called_once()
+    mock_hf_datasets_apis["returned_dataset_instance"].save_to_disk.assert_called_once_with(str(public_path))
+
+def test_download_dataset_private_prefers_public_over_private(
+    temp_datasets_store, mock_hf_datasets_apis, mock_s3_utils_for_dm, 
+    mock_utils_for_dm, monkeypatch, capsys
+):
+    """Test that private download prefers existing public over private."""
+    dataset_id = "test/dataset"
+    
+    # Create both public and private datasets
+    private_path = _get_dataset_path(dataset_id, config=default_config, is_public=False)
+    public_path = _get_dataset_path(dataset_id, config=default_config, is_public=True)
+    
+    os.makedirs(private_path, exist_ok=True)
+    (private_path / "dataset_info.json").touch()
+    
+    os.makedirs(public_path, exist_ok=True)
+    (public_path / "dataset_info.json").touch()
+    
+    # Call download_dataset without force_public_cache or make_public
+    success, result_path = download_dataset(
+        dataset_id=dataset_id,
+        config=default_config
+    )
+    
+    # Should return public path (preferred)
+    assert success
+    assert str(public_path) == result_path
+    
+    # Should not call HF download since dataset exists locally
+    mock_hf_datasets_apis["load_dataset"].assert_not_called()
+    
+    captured = capsys.readouterr()
+    assert "already exists in public cache" in captured.out
+
+def test_download_dataset_private_uses_private_when_no_public(
+    temp_datasets_store, mock_hf_datasets_apis, mock_s3_utils_for_dm, 
+    mock_utils_for_dm, monkeypatch, capsys
+):
+    """Test that private download uses private when no public exists."""
+    dataset_id = "test/dataset"
+    
+    # Create only private dataset
+    private_path = _get_dataset_path(dataset_id, config=default_config, is_public=False)
+    os.makedirs(private_path, exist_ok=True)
+    (private_path / "dataset_info.json").touch()
+    
+    # Ensure public path doesn't exist
+    public_path = _get_dataset_path(dataset_id, config=default_config, is_public=True)
+    assert not public_path.exists()
+    
+    # Call download_dataset without force_public_cache or make_public
+    success, result_path = download_dataset(
+        dataset_id=dataset_id,
+        config=default_config
+    )
+    
+    # Should return private path
+    assert success
+    assert str(private_path) == result_path
+    
+    # Should not call HF download since dataset exists locally
+    mock_hf_datasets_apis["load_dataset"].assert_not_called()
+    
+    captured = capsys.readouterr()
+    assert "already exists in private cache" in captured.out

@@ -15,6 +15,7 @@ const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000,
+  withCredentials: true, // Enable cookies for cross-origin requests
   headers: {
     'Content-Type': 'application/json',
   },

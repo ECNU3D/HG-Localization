@@ -1,5 +1,6 @@
 # hg_localization package 
 from .core import (
+    HGLocalizationConfig,
     download_dataset, 
     load_local_dataset, 
     list_local_datasets, 
@@ -12,6 +13,7 @@ from .core import (
 )
 
 __all__ = [
+    "HGLocalizationConfig",
     "download_dataset",
     "load_local_dataset",
     "list_local_datasets",

@@ -1,7 +1,9 @@
 """Core functionalities for Hugging Face dataset localization with S3 support."""
 
-# Import configurations and constants first to make them available to other modules if needed
+# Import the new configuration system
 from .config import (
+    HGLocalizationConfig, default_config,
+    # Backward compatibility: expose the old global variables
     S3_BUCKET_NAME, S3_ENDPOINT_URL, AWS_ACCESS_KEY_ID, 
     AWS_SECRET_ACCESS_KEY, S3_DATA_PREFIX,
     DATASETS_STORE_PATH,
@@ -34,7 +36,11 @@ from .dataset_manager import (
 
 # Define __all__ for explicit public API exposure
 __all__ = [
-    # Configs (optional to expose, depends on library usage philosophy)
+    # New configuration system
+    "HGLocalizationConfig",
+    "default_config",
+    
+    # Backward compatibility: old global variables (deprecated)
     "S3_BUCKET_NAME",
     "S3_ENDPOINT_URL",
     "AWS_ACCESS_KEY_ID",
