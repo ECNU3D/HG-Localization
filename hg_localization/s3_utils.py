@@ -360,3 +360,314 @@ def _make_model_metadata_public(s3_client: Any, bucket_name: str, model_id: str,
             success = False
     
     return success 
+
+# --- Private Datasets Index Utilities ---
+
+def _update_private_datasets_index(s3_client: Any, bucket_name: str, dataset_id: str, config_name: Optional[str], revision: Optional[str], config: Optional[HGLocalizationConfig] = None) -> bool:
+    """Updates the private_datasets_index.json file in S3 when a dataset is uploaded privately."""
+    if config is None:
+        config = default_config
+        
+    if not s3_client: return False
+    
+    current_index_data = {}
+    full_index_s3_key = _get_prefixed_s3_key(config.private_datasets_index_key, config)
+    
+    # Try to fetch existing index
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=full_index_s3_key)
+        current_index_data = json.loads(response['Body'].read().decode('utf-8'))
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            print(f"{full_index_s3_key} not found in S3, will create a new one.")
+        else:
+            print(f"Error fetching {full_index_s3_key} from S3: {e}")
+            return False
+    except json.JSONDecodeError:
+        print(f"Error: {full_index_s3_key} in S3 is corrupted. Will overwrite.")
+        current_index_data = {}
+
+    # Create entry key and data
+    entry_key = f"{dataset_id}---{config_name or config.default_config_name}---{revision or config.default_revision_name}"
+    s3_prefix_path = _get_s3_prefix(dataset_id, config_name, revision, config)
+    
+    # Check if dataset card exists
+    s3_card_key = f"{s3_prefix_path}/dataset_card.md"
+    has_card = False
+    try:
+        s3_client.head_object(Bucket=bucket_name, Key=s3_card_key)
+        has_card = True
+    except ClientError:
+        pass
+    
+    current_index_data[entry_key] = {
+        "dataset_id": dataset_id,
+        "config_name": config_name,
+        "revision": revision,
+        "s3_prefix": s3_prefix_path,
+        "s3_bucket": bucket_name,
+        "has_card": has_card,
+        "last_updated": json.dumps({"timestamp": str(Path(__file__).stat().st_mtime)})  # Simple timestamp
+    }
+
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=full_index_s3_key,
+            Body=json.dumps(current_index_data, indent=2),
+            ContentType='application/json'
+            # Note: No ACL='public-read' for private index
+        )
+        print(f"Successfully updated private datasets index {full_index_s3_key} in S3.")
+        return True
+    except Exception as e:
+        print(f"Error uploading {full_index_s3_key} to S3: {e}")
+        return False
+
+def _fetch_private_datasets_index(config: Optional[HGLocalizationConfig] = None) -> Optional[Dict[str, Any]]:
+    """Fetches the private_datasets_index.json from S3 using authenticated access."""
+    if config is None:
+        config = default_config
+        
+    s3_client = _get_s3_client(config)
+    if not s3_client or not config.s3_bucket_name:
+        print("S3 client not available or bucket not configured. Cannot fetch private datasets index.")
+        return None
+
+    full_index_s3_key = _get_prefixed_s3_key(config.private_datasets_index_key, config)
+    
+    try:
+        print(f"Fetching private datasets index from: s3://{config.s3_bucket_name}/{full_index_s3_key}")
+        response = s3_client.get_object(Bucket=config.s3_bucket_name, Key=full_index_s3_key)
+        return json.loads(response['Body'].read().decode('utf-8'))
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            print(f"Private datasets index not found at s3://{config.s3_bucket_name}/{full_index_s3_key}")
+        else:
+            print(f"Error fetching private datasets index: {e}")
+        return None
+    except json.JSONDecodeError:
+        print(f"Error: Private datasets index at s3://{config.s3_bucket_name}/{full_index_s3_key} is not valid JSON.")
+        return None
+    except Exception as e:
+        print(f"Unexpected error fetching private datasets index: {e}")
+        return None
+
+def _remove_from_private_datasets_index(s3_client: Any, bucket_name: str, dataset_id: str, config_name: Optional[str], revision: Optional[str], config: Optional[HGLocalizationConfig] = None) -> bool:
+    """Removes a dataset entry from the private_datasets_index.json file in S3."""
+    if config is None:
+        config = default_config
+        
+    if not s3_client: return False
+    
+    full_index_s3_key = _get_prefixed_s3_key(config.private_datasets_index_key, config)
+    
+    # Try to fetch existing index
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=full_index_s3_key)
+        current_index_data = json.loads(response['Body'].read().decode('utf-8'))
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            print(f"Private datasets index {full_index_s3_key} not found, nothing to remove.")
+            return True  # Consider this success since the entry doesn't exist anyway
+        else:
+            print(f"Error fetching {full_index_s3_key} from S3: {e}")
+            return False
+    except json.JSONDecodeError:
+        print(f"Error: {full_index_s3_key} in S3 is corrupted.")
+        return False
+
+    # Remove entry if it exists
+    entry_key = f"{dataset_id}---{config_name or config.default_config_name}---{revision or config.default_revision_name}"
+    if entry_key in current_index_data:
+        del current_index_data[entry_key]
+        
+        try:
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=full_index_s3_key,
+                Body=json.dumps(current_index_data, indent=2),
+                ContentType='application/json'
+            )
+            print(f"Successfully removed {entry_key} from private datasets index.")
+            return True
+        except Exception as e:
+            print(f"Error updating private datasets index after removal: {e}")
+            return False
+    else:
+        print(f"Entry {entry_key} not found in private datasets index.")
+        return True  # Consider this success since the entry doesn't exist
+
+# --- Private Models Index Utilities ---
+
+def _update_private_models_index(s3_client: Any, bucket_name: str, model_id: str, revision: Optional[str], config: Optional[HGLocalizationConfig] = None) -> bool:
+    """Updates the private_models_index.json file in S3 when a model is uploaded privately."""
+    if config is None:
+        config = default_config
+        
+    if not s3_client: return False
+    
+    current_index_data = {}
+    full_index_s3_key = _get_prefixed_s3_key(config.private_models_index_key, config)
+    
+    # Try to fetch existing index
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=full_index_s3_key)
+        current_index_data = json.loads(response['Body'].read().decode('utf-8'))
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            print(f"{full_index_s3_key} not found in S3, will create a new one.")
+        else:
+            print(f"Error fetching {full_index_s3_key} from S3: {e}")
+            return False
+    except json.JSONDecodeError:
+        print(f"Error: {full_index_s3_key} in S3 is corrupted. Will overwrite.")
+        current_index_data = {}
+
+    # Create entry key and data
+    entry_key = f"{model_id}---{revision or config.default_revision_name}"
+    
+    # Import here to avoid circular imports
+    from .model_manager import _get_model_s3_prefix
+    s3_prefix_path = _get_model_s3_prefix(model_id, revision, config)
+    
+    # Check what files exist for this model
+    model_card_key = f"{s3_prefix_path}/model_card.md"
+    model_config_key = f"{s3_prefix_path}/config.json"
+    
+    has_card = False
+    has_config = False
+    has_tokenizer = False
+    is_full_model = False
+    
+    try:
+        s3_client.head_object(Bucket=bucket_name, Key=model_card_key)
+        has_card = True
+    except ClientError:
+        pass
+    
+    try:
+        s3_client.head_object(Bucket=bucket_name, Key=model_config_key)
+        has_config = True
+    except ClientError:
+        pass
+    
+    # Check for tokenizer files
+    tokenizer_patterns = ["tokenizer.json", "tokenizer_config.json"]
+    for pattern in tokenizer_patterns:
+        try:
+            s3_client.head_object(Bucket=bucket_name, Key=f"{s3_prefix_path}/{pattern}")
+            has_tokenizer = True
+            break
+        except ClientError:
+            continue
+    
+    # Check for model weights (indicates full model vs metadata-only)
+    weight_patterns = ["pytorch_model.bin", "model.safetensors"]
+    for pattern in weight_patterns:
+        try:
+            s3_client.head_object(Bucket=bucket_name, Key=f"{s3_prefix_path}/{pattern}")
+            is_full_model = True
+            break
+        except ClientError:
+            continue
+    
+    current_index_data[entry_key] = {
+        "model_id": model_id,
+        "revision": revision,
+        "s3_prefix": s3_prefix_path,
+        "s3_bucket": bucket_name,
+        "has_card": has_card,
+        "has_config": has_config,
+        "has_tokenizer": has_tokenizer,
+        "is_full_model": is_full_model,
+        "last_updated": json.dumps({"timestamp": str(Path(__file__).stat().st_mtime)})  # Simple timestamp
+    }
+
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=full_index_s3_key,
+            Body=json.dumps(current_index_data, indent=2),
+            ContentType='application/json'
+            # Note: No ACL='public-read' for private index
+        )
+        print(f"Successfully updated private models index {full_index_s3_key} in S3.")
+        return True
+    except Exception as e:
+        print(f"Error uploading {full_index_s3_key} to S3: {e}")
+        return False
+
+def _fetch_private_models_index(config: Optional[HGLocalizationConfig] = None) -> Optional[Dict[str, Any]]:
+    """Fetches the private_models_index.json from S3 using authenticated access."""
+    if config is None:
+        config = default_config
+        
+    s3_client = _get_s3_client(config)
+    if not s3_client or not config.s3_bucket_name:
+        print("S3 client not available or bucket not configured. Cannot fetch private models index.")
+        return None
+
+    full_index_s3_key = _get_prefixed_s3_key(config.private_models_index_key, config)
+    
+    try:
+        print(f"Fetching private models index from: s3://{config.s3_bucket_name}/{full_index_s3_key}")
+        response = s3_client.get_object(Bucket=config.s3_bucket_name, Key=full_index_s3_key)
+        return json.loads(response['Body'].read().decode('utf-8'))
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            print(f"Private models index not found at s3://{config.s3_bucket_name}/{full_index_s3_key}")
+        else:
+            print(f"Error fetching private models index: {e}")
+        return None
+    except json.JSONDecodeError:
+        print(f"Error: Private models index at s3://{config.s3_bucket_name}/{full_index_s3_key} is not valid JSON.")
+        return None
+    except Exception as e:
+        print(f"Unexpected error fetching private models index: {e}")
+        return None
+
+def _remove_from_private_models_index(s3_client: Any, bucket_name: str, model_id: str, revision: Optional[str], config: Optional[HGLocalizationConfig] = None) -> bool:
+    """Removes a model entry from the private_models_index.json file in S3."""
+    if config is None:
+        config = default_config
+        
+    if not s3_client: return False
+    
+    full_index_s3_key = _get_prefixed_s3_key(config.private_models_index_key, config)
+    
+    # Try to fetch existing index
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=full_index_s3_key)
+        current_index_data = json.loads(response['Body'].read().decode('utf-8'))
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            print(f"Private models index {full_index_s3_key} not found, nothing to remove.")
+            return True  # Consider this success since the entry doesn't exist anyway
+        else:
+            print(f"Error fetching {full_index_s3_key} from S3: {e}")
+            return False
+    except json.JSONDecodeError:
+        print(f"Error: {full_index_s3_key} in S3 is corrupted.")
+        return False
+
+    # Remove entry if it exists
+    entry_key = f"{model_id}---{revision or config.default_revision_name}"
+    if entry_key in current_index_data:
+        del current_index_data[entry_key]
+        
+        try:
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=full_index_s3_key,
+                Body=json.dumps(current_index_data, indent=2),
+                ContentType='application/json'
+            )
+            print(f"Successfully removed {entry_key} from private models index.")
+            return True
+        except Exception as e:
+            print(f"Error updating private models index after removal: {e}")
+            return False
+    else:
+        print(f"Entry {entry_key} not found in private models index.")
+        return True  # Consider this success since the entry doesn't exist 

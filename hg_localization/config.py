@@ -22,7 +22,9 @@ class HGLocalizationConfig:
         default_revision_name: str = "default_revision",
         public_datasets_json_key: str = "public_datasets.json",
         public_datasets_zip_dir_prefix: str = "public_datasets_zip",
-        public_models_json_key: str = "public_models.json"
+        public_models_json_key: str = "public_models.json",
+        private_datasets_index_key: str = "private_datasets_index.json",
+        private_models_index_key: str = "private_models_index.json"
     ):
         """
         Initialize configuration.
@@ -40,6 +42,8 @@ class HGLocalizationConfig:
             public_datasets_json_key: S3 key for public datasets manifest
             public_datasets_zip_dir_prefix: S3 prefix for public dataset zips
             public_models_json_key: S3 key for public models manifest
+            private_datasets_index_key: S3 key for private datasets index
+            private_models_index_key: S3 key for private models index
         """
         self.s3_bucket_name = s3_bucket_name
         self.s3_endpoint_url = s3_endpoint_url
@@ -72,6 +76,8 @@ class HGLocalizationConfig:
         self.public_datasets_json_key = public_datasets_json_key
         self.public_datasets_zip_dir_prefix = public_datasets_zip_dir_prefix
         self.public_models_json_key = public_models_json_key
+        self.private_datasets_index_key = private_datasets_index_key
+        self.private_models_index_key = private_models_index_key
     
     @property
     def public_datasets_store_path(self) -> Path:
@@ -98,7 +104,9 @@ class HGLocalizationConfig:
             default_revision_name=os.environ.get("HGLOC_DEFAULT_REVISION_NAME", "default_revision"),
             public_datasets_json_key=os.environ.get("HGLOC_PUBLIC_DATASETS_JSON_KEY", "public_datasets.json"),
             public_datasets_zip_dir_prefix=os.environ.get("HGLOC_PUBLIC_DATASETS_ZIP_DIR_PREFIX", "public_datasets_zip"),
-            public_models_json_key=os.environ.get("HGLOC_PUBLIC_MODELS_JSON_KEY", "public_models.json")
+            public_models_json_key=os.environ.get("HGLOC_PUBLIC_MODELS_JSON_KEY", "public_models.json"),
+            private_datasets_index_key=os.environ.get("HGLOC_PRIVATE_DATASETS_INDEX_KEY", "private_datasets_index.json"),
+            private_models_index_key=os.environ.get("HGLOC_PRIVATE_MODELS_INDEX_KEY", "private_models_index.json")
         )
     
     def is_s3_configured(self) -> bool:
@@ -130,4 +138,6 @@ DEFAULT_CONFIG_NAME = default_config.default_config_name
 DEFAULT_REVISION_NAME = default_config.default_revision_name
 PUBLIC_DATASETS_JSON_KEY = default_config.public_datasets_json_key
 PUBLIC_DATASETS_ZIP_DIR_PREFIX = default_config.public_datasets_zip_dir_prefix
-PUBLIC_MODELS_JSON_KEY = default_config.public_models_json_key 
+PUBLIC_MODELS_JSON_KEY = default_config.public_models_json_key
+PRIVATE_DATASETS_INDEX_KEY = default_config.private_datasets_index_key
+PRIVATE_MODELS_INDEX_KEY = default_config.private_models_index_key 

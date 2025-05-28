@@ -14,7 +14,8 @@ from .utils import _get_safe_path_component, _restore_dataset_name, _zip_directo
 from .s3_utils import (
     _get_s3_client, _get_s3_prefix, _get_prefixed_s3_key,
     _upload_directory_to_s3, _download_directory_from_s3,
-    _get_s3_public_url, _update_public_models_json, _make_model_metadata_public
+    _get_s3_public_url, _update_public_models_json, _make_model_metadata_public,
+    _update_private_models_index, _fetch_private_models_index
 )
 
 # --- Path Utilities specific to model_manager ---
@@ -600,6 +601,11 @@ def download_model_metadata(model_id: str, revision: Optional[str] = None, make_
                 s3_prefix_path_for_upload = _get_model_s3_prefix(model_id, revision, config)
                 _upload_directory_to_s3(s3_client_for_upload, local_save_path, config.s3_bucket_name, s3_prefix_path_for_upload)
                 
+                # Update private index for non-public uploads
+                if not make_public:
+                    print(f"Updating private models index for {model_id} {version_str}...")
+                    _update_private_models_index(s3_client_for_upload, config.s3_bucket_name, model_id, revision, config)
+                
                 # Implement public model metadata functionality similar to datasets
                 if make_public:
                     print(f"Making model metadata public for {model_id} {version_str}...")
@@ -702,120 +708,159 @@ def list_s3_models(config: Optional[HGLocalizationConfig] = None) -> List[Dict[s
         print("config.s3_bucket_name not configured. Cannot list S3 models.")
         return []
 
+    # Try to use private index first for much faster performance
     if config.aws_access_key_id and config.aws_secret_access_key:
-        s3_client = _get_s3_client(config)
-        if s3_client:
-            print("Listing S3 models via authenticated API call (scanning bucket structure)...")
-            paginator = s3_client.get_paginator('list_objects_v2')
+        print("Attempting to list S3 models from private index (fast method)...")
+        private_index = _fetch_private_models_index(config)
+        if private_index:
+            print(f"Successfully fetched private models index with {len(private_index)} entries.")
+            for entry_key, entry_data in private_index.items():
+                if isinstance(entry_data, dict) and all(k in entry_data for k in ["model_id", "s3_prefix"]):
+                    # Generate S3 card URL if card exists
+                    s3_card_url = None
+                    if entry_data.get("has_card", False):
+                        card_key = f"{entry_data['s3_prefix']}/model_card.md"
+                        s3_card_url = _get_s3_public_url(config.s3_bucket_name, card_key, config.s3_endpoint_url)
+                    
+                    # Generate S3 config URL if config exists
+                    s3_config_url = None
+                    if entry_data.get("has_config", False):
+                        config_key = f"{entry_data['s3_prefix']}/config.json"
+                        s3_config_url = _get_s3_public_url(config.s3_bucket_name, config_key, config.s3_endpoint_url)
+                    
+                    available_s3_models.append({
+                        "model_id": entry_data["model_id"],
+                        "revision": entry_data.get("revision"),
+                        "has_card": entry_data.get("has_card", False),
+                        "has_config": entry_data.get("has_config", False),
+                        "has_tokenizer": entry_data.get("has_tokenizer", False),
+                        "is_full_model": entry_data.get("is_full_model", False),
+                        "s3_card_url": s3_card_url,
+                        "s3_config_url": s3_config_url
+                    })
+                else:
+                    print(f"Skipping malformed entry in private models index: {entry_key}")
             
-            # scan_base_prefix should be the S3_DATA_PREFIX + "models/", ensuring it ends with a slash if not empty
-            scan_base_prefix = config.s3_data_prefix.strip('/') + '/' if config.s3_data_prefix else ""
-            scan_base_prefix += "models/"
+            if available_s3_models:
+                print(f"Listed {len(available_s3_models)} S3 models from private index.")
+                return available_s3_models
+        else:
+            print("Private models index not found or could not be fetched. Falling back to bucket scanning...")
             
-            try:
-                # Level 1: List model_id directories
-                level1_pages = paginator.paginate(
-                    Bucket=config.s3_bucket_name,
-                    Prefix=scan_base_prefix,
-                    Delimiter='/'
-                )
+            # Fallback to slow bucket scanning method
+            s3_client = _get_s3_client(config)
+            if s3_client:
+                print("Listing S3 models via authenticated API call (scanning bucket structure - slow method)...")
+                paginator = s3_client.get_paginator('list_objects_v2')
                 
-                for page in level1_pages:
-                    common_prefixes = page.get('CommonPrefixes', [])
-                    for prefix_info in common_prefixes:
-                        model_id_prefix = prefix_info['Prefix']
-                        # Extract model_id from prefix
-                        model_id_safe = model_id_prefix[len(scan_base_prefix):].rstrip('/')
-                        if not model_id_safe:
-                            continue
-                        
-                        # Restore original model_id
-                        model_id_orig = _restore_dataset_name(model_id_safe)
-                        
-                        # Level 2: List revision directories under this model_id
-                        level2_pages = paginator.paginate(
-                            Bucket=config.s3_bucket_name,
-                            Prefix=model_id_prefix,
-                            Delimiter='/'
-                        )
-                        
-                        for level2_page in level2_pages:
-                            level2_common_prefixes = level2_page.get('CommonPrefixes', [])
-                            for level2_prefix_info in level2_common_prefixes:
-                                revision_prefix = level2_prefix_info['Prefix']
-                                # Extract revision from prefix
-                                revision_safe = revision_prefix[len(model_id_prefix):].rstrip('/')
-                                if not revision_safe:
-                                    continue
-                                
-                                # For revisions, don't use _restore_dataset_name since revisions don't contain slashes
-                                # Just use the revision_safe directly
-                                revision_display = revision_safe if revision_safe != config.default_revision_name else None
-                                
-                                # Check if this model has a card
-                                s3_card_key = f"{revision_prefix}model_card.md"
-                                has_card = False
-                                try:
-                                    s3_client.head_object(Bucket=config.s3_bucket_name, Key=s3_card_key)
-                                    has_card = True
-                                except ClientError:
-                                    pass
-                                
-                                # Check if this model has a config
-                                s3_config_key = f"{revision_prefix}config.json"
-                                has_config = False
-                                try:
-                                    s3_client.head_object(Bucket=config.s3_bucket_name, Key=s3_config_key)
-                                    has_config = True
-                                except ClientError:
-                                    pass
-                                
-                                # Check if this is a full model (has weights)
-                                is_full_model = False
-                                weight_patterns = ["pytorch_model.bin", "model.safetensors"]
-                                for pattern in weight_patterns:
-                                    try:
-                                        s3_client.head_object(Bucket=config.s3_bucket_name, Key=f"{revision_prefix}{pattern}")
-                                        is_full_model = True
-                                        break
-                                    except ClientError:
-                                        continue
-                                
-                                # Check for tokenizer files
-                                has_tokenizer = False
-                                tokenizer_patterns = ["tokenizer.json", "tokenizer_config.json"]
-                                for pattern in tokenizer_patterns:
-                                    try:
-                                        s3_client.head_object(Bucket=config.s3_bucket_name, Key=f"{revision_prefix}{pattern}")
-                                        has_tokenizer = True
-                                        break
-                                    except ClientError:
-                                        continue
-                                
-                                # Generate S3 card URL if card exists
-                                s3_card_url = None
-                                if has_card:
-                                    s3_card_url = _get_s3_public_url(config.s3_bucket_name, s3_card_key, config.s3_endpoint_url)
-                                
-                                model_info = {
-                                    "model_id": model_id_orig,
-                                    "revision": revision_display,
-                                    "has_card": has_card,
-                                    "has_config": has_config,
-                                    "has_tokenizer": has_tokenizer,
-                                    "is_full_model": is_full_model,
-                                    "s3_card_url": s3_card_url
-                                }
-                                available_s3_models.append(model_info)
+                # scan_base_prefix should be the S3_DATA_PREFIX + "models/", ensuring it ends with a slash if not empty
+                scan_base_prefix = config.s3_data_prefix.strip('/') + '/' if config.s3_data_prefix else ""
+                scan_base_prefix += "models/"
                 
-            except ClientError as e:
-                print(f"Error listing S3 models: {e}")
-                return []
-            except Exception as e:
-                print(f"Unexpected error listing S3 models: {e}")
-                return []
-    else:
-        print("AWS credentials not configured. Cannot list S3 models via authenticated API.")
+                try:
+                    # Level 1: List model_id directories
+                    level1_pages = paginator.paginate(
+                        Bucket=config.s3_bucket_name,
+                        Prefix=scan_base_prefix,
+                        Delimiter='/'
+                    )
+                    
+                    for page in level1_pages:
+                        common_prefixes = page.get('CommonPrefixes', [])
+                        for prefix_info in common_prefixes:
+                            model_id_prefix = prefix_info['Prefix']
+                            # Extract model_id from prefix
+                            model_id_safe = model_id_prefix[len(scan_base_prefix):].rstrip('/')
+                            if not model_id_safe:
+                                continue
+                            
+                            # Restore original model_id
+                            model_id_orig = _restore_dataset_name(model_id_safe)
+                            
+                            # Level 2: List revision directories under this model_id
+                            level2_pages = paginator.paginate(
+                                Bucket=config.s3_bucket_name,
+                                Prefix=model_id_prefix,
+                                Delimiter='/'
+                            )
+                            
+                            for level2_page in level2_pages:
+                                level2_common_prefixes = level2_page.get('CommonPrefixes', [])
+                                for level2_prefix_info in level2_common_prefixes:
+                                    revision_prefix = level2_prefix_info['Prefix']
+                                    # Extract revision from prefix
+                                    revision_safe = revision_prefix[len(model_id_prefix):].rstrip('/')
+                                    if not revision_safe:
+                                        continue
+                                    
+                                    # For revisions, don't use _restore_dataset_name since revisions don't contain slashes
+                                    # Just use the revision_safe directly
+                                    revision_display = revision_safe if revision_safe != config.default_revision_name else None
+                                    
+                                    # Check if this model has a card
+                                    s3_card_key = f"{revision_prefix}model_card.md"
+                                    has_card = False
+                                    try:
+                                        s3_client.head_object(Bucket=config.s3_bucket_name, Key=s3_card_key)
+                                        has_card = True
+                                    except ClientError:
+                                        pass
+                                    
+                                    # Check if this model has a config
+                                    s3_config_key = f"{revision_prefix}config.json"
+                                    has_config = False
+                                    try:
+                                        s3_client.head_object(Bucket=config.s3_bucket_name, Key=s3_config_key)
+                                        has_config = True
+                                    except ClientError:
+                                        pass
+                                    
+                                    # Check if this is a full model (has weights)
+                                    is_full_model = False
+                                    weight_patterns = ["pytorch_model.bin", "model.safetensors"]
+                                    for pattern in weight_patterns:
+                                        try:
+                                            s3_client.head_object(Bucket=config.s3_bucket_name, Key=f"{revision_prefix}{pattern}")
+                                            is_full_model = True
+                                            break
+                                        except ClientError:
+                                            continue
+                                    
+                                    # Check for tokenizer files
+                                    has_tokenizer = False
+                                    tokenizer_patterns = ["tokenizer.json", "tokenizer_config.json"]
+                                    for pattern in tokenizer_patterns:
+                                        try:
+                                            s3_client.head_object(Bucket=config.s3_bucket_name, Key=f"{revision_prefix}{pattern}")
+                                            has_tokenizer = True
+                                            break
+                                        except ClientError:
+                                            continue
+                                    
+                                    # Generate S3 card URL if card exists
+                                    s3_card_url = None
+                                    if has_card:
+                                        s3_card_url = _get_s3_public_url(config.s3_bucket_name, s3_card_key, config.s3_endpoint_url)
+                                    
+                                    model_info = {
+                                        "model_id": model_id_orig,
+                                        "revision": revision_display,
+                                        "has_card": has_card,
+                                        "has_config": has_config,
+                                        "has_tokenizer": has_tokenizer,
+                                        "is_full_model": is_full_model,
+                                        "s3_card_url": s3_card_url
+                                    }
+                                    available_s3_models.append(model_info)
+                    
+                except ClientError as e:
+                    print(f"Error listing S3 models: {e}")
+                    return []
+                except Exception as e:
+                    print(f"Unexpected error listing S3 models: {e}")
+                    return []
+            else:
+                print("AWS credentials not configured. Cannot list S3 models via authenticated API.")
 
     # Fallback or primary method if no AWS creds: list from public_models.json
     # Only do this if we haven't populated available_s3_models from scanning yet.
@@ -852,7 +897,7 @@ def list_s3_models(config: Optional[HGLocalizationConfig] = None) -> List[Dict[s
             print(f"Could not fetch or parse {config.public_models_json_key} from public URL.")
 
     if not available_s3_models:
-        print(f"No models found in S3 bucket '{config.s3_bucket_name}' by scanning or from public list.")
+        print(f"No models found in S3 bucket '{config.s3_bucket_name}' by any method.")
     else:
         print(f"Found {len(available_s3_models)} S3 model(s):")
         for model_info in available_s3_models:

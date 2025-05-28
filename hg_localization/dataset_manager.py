@@ -16,7 +16,8 @@ from .s3_utils import (
     _get_s3_client, _get_s3_prefix, _get_prefixed_s3_key,
     _check_s3_dataset_exists, _upload_directory_to_s3,
     _download_directory_from_s3, _update_public_datasets_json,
-    _get_s3_public_url, get_s3_dataset_card_presigned_url
+    _get_s3_public_url, get_s3_dataset_card_presigned_url,
+    _update_private_datasets_index, _fetch_private_datasets_index
 )
 
 # --- Path Utilities specific to dataset_manager ---
@@ -421,6 +422,11 @@ def download_dataset(dataset_id: str, config_name: Optional[str] = None, revisio
                 s3_prefix_path_for_upload = _get_s3_prefix(dataset_id, config_name, revision, config)
                 _upload_directory_to_s3(s3_client_for_upload, local_save_path, config.s3_bucket_name, s3_prefix_path_for_upload)
 
+                # Update private index for non-public uploads
+                if not make_public:
+                    print(f"Updating private datasets index for {dataset_id} {version_str}...")
+                    _update_private_datasets_index(s3_client_for_upload, config.s3_bucket_name, dataset_id, config_name, revision, config)
+
                 if make_public:
                     print(f"Preparing to make dataset {dataset_id} {version_str} public...")
                     safe_dataset_id = _get_safe_path_component(dataset_id)
@@ -682,6 +688,11 @@ dataset = load_local_dataset(
             _upload_directory_to_s3(s3_client, local_save_path, config.s3_bucket_name, s3_prefix_path)
             print(f"Successfully initiated upload of dataset '{dataset_id}' {version_str} to S3.")
             
+            # Update private index for non-public uploads
+            if not make_public:
+                print(f"Updating private datasets index for {dataset_id} {version_str}...")
+                _update_private_datasets_index(s3_client, config.s3_bucket_name, dataset_id, config_name, revision, config)
+
             if make_public:
                 print(f"Preparing to make (uploaded) dataset {dataset_id} {version_str} public...")
                 safe_dataset_id = _get_safe_path_component(dataset_id)
@@ -863,71 +874,105 @@ def list_s3_datasets(config: Optional[HGLocalizationConfig] = None) -> List[Dict
         print("config.s3_bucket_name not configured. Cannot list S3 datasets.")
         return []
 
+    # Try to use private index first for much faster performance
     if config.aws_access_key_id and config.aws_secret_access_key:
-        s3_client = _get_s3_client(config)
-        if s3_client:
-            print("Listing S3 datasets via authenticated API call (scanning bucket structure)...")
-            paginator = s3_client.get_paginator('list_objects_v2')
+        print("Attempting to list S3 datasets from private index (fast method)...")
+        private_index = _fetch_private_datasets_index(config)
+        if private_index:
+            print(f"Successfully fetched private datasets index with {len(private_index)} entries.")
+            for entry_key, entry_data in private_index.items():
+                if isinstance(entry_data, dict) and all(k in entry_data for k in ["dataset_id", "s3_prefix"]):
+                    # Generate S3 card URL if card exists
+                    s3_card_url = None
+                    if entry_data.get("has_card", False):
+                        card_key = f"{entry_data['s3_prefix']}/dataset_card.md"
+                        s3_card_url = get_s3_dataset_card_presigned_url(
+                            entry_data["dataset_id"],
+                            entry_data.get("config_name"),
+                            entry_data.get("revision"),
+                            config=config
+                        )
+                    
+                    available_s3_datasets.append({
+                        "dataset_id": entry_data["dataset_id"],
+                        "config_name": entry_data.get("config_name"),
+                        "revision": entry_data.get("revision"),
+                        "s3_card_url": s3_card_url
+                    })
+                else:
+                    print(f"Skipping malformed entry in private datasets index: {entry_key}")
             
-            # scan_base_prefix should be the S3_DATA_PREFIX, ensuring it ends with a slash if not empty
-            scan_base_prefix = config.s3_data_prefix.strip('/') + '/' if config.s3_data_prefix else ""
-
-            try:
-                # Iterate through dataset_id level
-                for page1 in paginator.paginate(Bucket=config.s3_bucket_name, Prefix=scan_base_prefix, Delimiter='/'):
-                    for common_prefix1 in page1.get('CommonPrefixes', []): # These are "directories" at dataset_id level
-                        dataset_id_full_prefix = common_prefix1.get('Prefix', '') # e.g., "my_data_prefix/dataset_id_safe/"
-                        if not dataset_id_full_prefix or not dataset_id_full_prefix.endswith('/'): continue
-                        
-                        # Extract dataset_id part relative to scan_base_prefix
-                        dataset_id_from_s3 = dataset_id_full_prefix[len(scan_base_prefix):].strip('/')
-                        if not dataset_id_from_s3: continue # Skip if it's somehow empty
-
-                        # Iterate through config_name level
-                        for page2 in paginator.paginate(Bucket=config.s3_bucket_name, Prefix=dataset_id_full_prefix, Delimiter='/'):
-                            for common_prefix2 in page2.get('CommonPrefixes', []):
-                                config_name_full_prefix = common_prefix2.get('Prefix', '') # e.g., "my_data_prefix/dataset_id_safe/config_name_safe/"
-                                if not config_name_full_prefix or not config_name_full_prefix.endswith('/'): continue
-                                
-                                config_name_from_s3 = config_name_full_prefix[len(dataset_id_full_prefix):].strip('/')
-                                if not config_name_from_s3: continue
-
-                                # Iterate through revision level
-                                for page3 in paginator.paginate(Bucket=config.s3_bucket_name, Prefix=config_name_full_prefix, Delimiter='/'):
-                                    for common_prefix3 in page3.get('CommonPrefixes', []):
-                                        revision_full_prefix = common_prefix3.get('Prefix', '') # e.g., "my_data_prefix/dataset_id_safe/config_name_safe/revision_safe/"
-                                        if not revision_full_prefix or not revision_full_prefix.endswith('/'): continue
-                                        
-                                        revision_from_s3 = revision_full_prefix[len(config_name_full_prefix):].strip('/')
-                                        if not revision_from_s3: continue
-                                        
-                                        # The revision_full_prefix is the s3_prefix for this specific dataset version
-                                        current_dataset_version_s3_prefix = revision_full_prefix.rstrip('/')
-                                        
-                                        if _check_s3_dataset_exists(s3_client, config.s3_bucket_name, current_dataset_version_s3_prefix):
-                                            # Note: dataset_id, config_name, revision are the "safe" names from S3 path
-                                            # The CLI or user might expect original names if they were different.
-                                            # For consistency, we list what's in S3 path structure.
-                                            s3_card_url = get_s3_dataset_card_presigned_url(
-                                                dataset_id=dataset_id_from_s3, # Use the actual path components
-                                                config_name=config_name_from_s3,
-                                                revision=revision_from_s3,
-                                                config=config
-                                            )
-                                            available_s3_datasets.append({
-                                                "dataset_id": _restore_dataset_name(dataset_id_from_s3),
-                                                "config_name": config_name_from_s3 if config_name_from_s3 != config.default_config_name else None,
-                                                "revision": revision_from_s3 if revision_from_s3 != config.default_revision_name else None,
-                                                "s3_card_url": s3_card_url
-                                            })
-                if available_s3_datasets:
-                    print("Successfully listed S3 datasets by scanning bucket structure.")
-                    return available_s3_datasets
-                print("No datasets found by scanning S3 bucket structure (or structure did not match expected format).")
-            except ClientError as e:
-                print(f"Error listing S3 datasets via API: {e}. Falling back to check public list if applicable.")
+            if available_s3_datasets:
+                print(f"Listed {len(available_s3_datasets)} S3 datasets from private index.")
+                return available_s3_datasets
         else:
-            print("S3 client could not be initialized despite credentials appearing to be set. Proceeding to check public list.")
+            print("Private datasets index not found or could not be fetched. Falling back to bucket scanning...")
+            
+            # Fallback to slow bucket scanning method
+            s3_client = _get_s3_client(config)
+            if s3_client:
+                print("Listing S3 datasets via authenticated API call (scanning bucket structure - slow method)...")
+                paginator = s3_client.get_paginator('list_objects_v2')
+                
+                # scan_base_prefix should be the S3_DATA_PREFIX, ensuring it ends with a slash if not empty
+                scan_base_prefix = config.s3_data_prefix.strip('/') + '/' if config.s3_data_prefix else ""
+
+                try:
+                    # Iterate through dataset_id level
+                    for page1 in paginator.paginate(Bucket=config.s3_bucket_name, Prefix=scan_base_prefix, Delimiter='/'):
+                        for common_prefix1 in page1.get('CommonPrefixes', []): # These are "directories" at dataset_id level
+                            dataset_id_full_prefix = common_prefix1.get('Prefix', '') # e.g., "my_data_prefix/dataset_id_safe/"
+                            if not dataset_id_full_prefix or not dataset_id_full_prefix.endswith('/'): continue
+                            
+                            # Extract dataset_id part relative to scan_base_prefix
+                            dataset_id_from_s3 = dataset_id_full_prefix[len(scan_base_prefix):].strip('/')
+                            if not dataset_id_from_s3: continue # Skip if it's somehow empty
+
+                            # Iterate through config_name level
+                            for page2 in paginator.paginate(Bucket=config.s3_bucket_name, Prefix=dataset_id_full_prefix, Delimiter='/'):
+                                for common_prefix2 in page2.get('CommonPrefixes', []):
+                                    config_name_full_prefix = common_prefix2.get('Prefix', '') # e.g., "my_data_prefix/dataset_id_safe/config_name_safe/"
+                                    if not config_name_full_prefix or not config_name_full_prefix.endswith('/'): continue
+                                    
+                                    config_name_from_s3 = config_name_full_prefix[len(dataset_id_full_prefix):].strip('/')
+                                    if not config_name_from_s3: continue
+
+                                    # Iterate through revision level
+                                    for page3 in paginator.paginate(Bucket=config.s3_bucket_name, Prefix=config_name_full_prefix, Delimiter='/'):
+                                        for common_prefix3 in page3.get('CommonPrefixes', []):
+                                            revision_full_prefix = common_prefix3.get('Prefix', '') # e.g., "my_data_prefix/dataset_id_safe/config_name_safe/revision_safe/"
+                                            if not revision_full_prefix or not revision_full_prefix.endswith('/'): continue
+                                            
+                                            revision_from_s3 = revision_full_prefix[len(config_name_full_prefix):].strip('/')
+                                            if not revision_from_s3: continue
+                                            
+                                            # The revision_full_prefix is the s3_prefix for this specific dataset version
+                                            current_dataset_version_s3_prefix = revision_full_prefix.rstrip('/')
+                                            
+                                            if _check_s3_dataset_exists(s3_client, config.s3_bucket_name, current_dataset_version_s3_prefix):
+                                                # Note: dataset_id, config_name, revision are the "safe" names from S3 path
+                                                # The CLI or user might expect original names if they were different.
+                                                # For consistency, we list what's in S3 path structure.
+                                                s3_card_url = get_s3_dataset_card_presigned_url(
+                                                    dataset_id=dataset_id_from_s3, # Use the actual path components
+                                                    config_name=config_name_from_s3,
+                                                    revision=revision_from_s3,
+                                                    config=config
+                                                )
+                                                available_s3_datasets.append({
+                                                    "dataset_id": _restore_dataset_name(dataset_id_from_s3),
+                                                    "config_name": config_name_from_s3 if config_name_from_s3 != config.default_config_name else None,
+                                                    "revision": revision_from_s3 if revision_from_s3 != config.default_revision_name else None,
+                                                    "s3_card_url": s3_card_url
+                                                })
+                    if available_s3_datasets:
+                        print("Successfully listed S3 datasets by scanning bucket structure.")
+                        return available_s3_datasets
+                    print("No datasets found by scanning S3 bucket structure (or structure did not match expected format).")
+                except ClientError as e:
+                    print(f"Error listing S3 datasets via API: {e}. Falling back to check public list if applicable.")
+            else:
+                print("S3 client could not be initialized despite credentials appearing to be set. Proceeding to check public list.")
 
     # Fallback or primary method if no AWS creds: list from public_datasets.json
     # Only do this if we haven't populated available_s3_datasets from scanning yet.
@@ -958,7 +1003,7 @@ def list_s3_datasets(config: Optional[HGLocalizationConfig] = None) -> List[Dict
             print(f"Could not fetch or parse {config.public_datasets_json_key} from public URL.")
     
     if not available_s3_datasets:
-        print(f"No datasets found in S3 bucket '{config.s3_bucket_name}' by scanning or from public list.")
+        print(f"No datasets found in S3 bucket '{config.s3_bucket_name}' by any method.")
     return available_s3_datasets
 
 
@@ -999,6 +1044,11 @@ def sync_local_dataset_to_s3(dataset_id: str, config_name: Optional[str] = None,
             _upload_directory_to_s3(s3_client, local_save_path, config.s3_bucket_name, s3_prefix_path_for_dataset)
             print(f"Successfully uploaded dataset '{dataset_id}' {version_str} to S3 (private).")
             private_s3_copy_exists = True
+            
+            # Update private index for non-public uploads
+            if not make_public:
+                print(f"Updating private datasets index for {dataset_id} {version_str}...")
+                _update_private_datasets_index(s3_client, config.s3_bucket_name, dataset_id, config_name, revision, config)
         except Exception as e:
             msg = f"Error uploading dataset '{dataset_id}' {version_str} to S3 (private): {e}"
             print(msg)
