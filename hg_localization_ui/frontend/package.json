@@ -4,6 +4,7 @@
   "private": true,
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
+    "@tailwindcss/typography": "^0.5.16",
     "@tanstack/react-query": "^5.8.4",
     "@types/node": "^20.9.0",
     "@types/react": "^18.2.37",
@@ -54,4 +55,4 @@
     "tailwindcss": "^3.3.5"
   },
   "proxy": "http://localhost:8000"
-} 
+}

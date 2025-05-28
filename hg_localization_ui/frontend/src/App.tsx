@@ -5,6 +5,8 @@ import { Layout } from './components/Layout';
 import { ConfigurationPage } from './pages/ConfigurationPage';
 import { DatasetsPage } from './pages/DatasetsPage';
 import { DatasetDetailPage } from './pages/DatasetDetailPage';
+import { ModelsPage } from './pages/ModelsPage';
+import { ModelDetailPage } from './pages/ModelDetailPage';
 import { useConfigStatus } from './hooks/useConfig';
 import './index.css';
 
@@ -88,6 +90,22 @@ function AppContent() {
             element={
               configStatus?.configured ? 
                 <DatasetDetailPage /> : 
+                <Navigate to="/config" replace />
+            } 
+          />
+          <Route 
+            path="/models" 
+            element={
+              configStatus?.configured ? 
+                <ModelsPage /> : 
+                <Navigate to="/config" replace />
+            } 
+          />
+          <Route 
+            path="/models/:modelId" 
+            element={
+              configStatus?.configured ? 
+                <ModelDetailPage /> : 
                 <Navigate to="/config" replace />
             } 
           />

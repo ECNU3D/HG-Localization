@@ -17,6 +17,7 @@ class HGLocalizationConfig:
         aws_secret_access_key: Optional[str] = None,
         s3_data_prefix: str = "",
         datasets_store_path: Optional[Path] = None,
+        models_store_path: Optional[Path] = None,
         default_config_name: str = "default_config",
         default_revision_name: str = "default_revision",
         public_datasets_json_key: str = "public_datasets.json",
@@ -26,12 +27,13 @@ class HGLocalizationConfig:
         Initialize configuration.
         
         Args:
-            s3_bucket_name: S3 bucket name for dataset storage
+            s3_bucket_name: S3 bucket name for dataset and model storage
             s3_endpoint_url: S3 endpoint URL (for custom S3-compatible services)
             aws_access_key_id: AWS access key ID
             aws_secret_access_key: AWS secret access key
             s3_data_prefix: Root prefix in the S3 bucket for all data
             datasets_store_path: Local path for dataset storage
+            models_store_path: Local path for model storage
             default_config_name: Default configuration name for datasets
             default_revision_name: Default revision name for datasets
             public_datasets_json_key: S3 key for public datasets manifest
@@ -53,6 +55,16 @@ class HGLocalizationConfig:
         else:
             self.datasets_store_path = datasets_store_path
             
+        # Set default models store path if not provided
+        if models_store_path is None:
+            _default_store_path_parent = Path(__file__).parent
+            self.models_store_path = Path(os.environ.get(
+                "HGLOC_MODELS_STORE_PATH", 
+                _default_store_path_parent / "models_store"
+            ))
+        else:
+            self.models_store_path = models_store_path
+            
         self.default_config_name = default_config_name
         self.default_revision_name = default_revision_name
         self.public_datasets_json_key = public_datasets_json_key
@@ -62,6 +74,11 @@ class HGLocalizationConfig:
     def public_datasets_store_path(self) -> Path:
         """Get the path for storing public datasets (subdirectory under main store)"""
         return self.datasets_store_path / "public"
+    
+    @property
+    def public_models_store_path(self) -> Path:
+        """Get the path for storing public models (subdirectory under main store)"""
+        return self.models_store_path / "public"
     
     @classmethod
     def from_env(cls) -> 'HGLocalizationConfig':
@@ -73,6 +90,7 @@ class HGLocalizationConfig:
             aws_secret_access_key=os.environ.get("HGLOC_AWS_SECRET_ACCESS_KEY"),
             s3_data_prefix=os.environ.get("HGLOC_S3_DATA_PREFIX", ""),
             datasets_store_path=None,  # Will use default logic in __init__
+            models_store_path=None,  # Will use default logic in __init__
             default_config_name=os.environ.get("HGLOC_DEFAULT_CONFIG_NAME", "default_config"),
             default_revision_name=os.environ.get("HGLOC_DEFAULT_REVISION_NAME", "default_revision"),
             public_datasets_json_key=os.environ.get("HGLOC_PUBLIC_DATASETS_JSON_KEY", "public_datasets.json"),

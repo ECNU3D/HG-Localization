@@ -9,6 +9,12 @@ from .core import (
     sync_local_dataset_to_s3,
     get_dataset_card_content,
     get_cached_dataset_card_content,
+    download_model_metadata,
+    list_local_models,
+    get_model_card_content,
+    get_cached_model_card_content,
+    get_model_config_content,
+    get_cached_model_config_content,
     DATASETS_STORE_PATH
 )
 
@@ -22,5 +28,11 @@ __all__ = [
     "sync_local_dataset_to_s3",
     "get_dataset_card_content",
     "get_cached_dataset_card_content",
+    "download_model_metadata",
+    "list_local_models",
+    "get_model_card_content",
+    "get_cached_model_card_content",
+    "get_model_config_content",
+    "get_cached_model_config_content",
     "DATASETS_STORE_PATH"
 ] 

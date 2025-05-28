@@ -33,6 +33,16 @@ from hg_localization import (
     upload_dataset
 )
 
+# Import model management functions
+from hg_localization.model_manager import (
+    download_model_metadata,
+    list_local_models,
+    get_cached_model_card_content,
+    get_cached_model_config_content,
+    get_model_card_content,
+    get_model_config_content
+)
+
 # Import migration functions
 from hg_localization.dataset_manager import (
     migrate_all_datasets_to_bucket_storage,
@@ -133,6 +143,30 @@ class DatasetPreview(BaseModel):
     features: Dict[str, Any]
     num_rows: Dict[str, int]
     sample_data: List[Dict[str, Any]]
+
+class ModelInfo(BaseModel):
+    model_id: str
+    revision: Optional[str]
+    path: Optional[str] = None
+    has_card: bool = False
+    has_config: bool = False
+    has_tokenizer: bool = False
+    is_full_model: bool = False
+    source: str  # "cached", "s3", or "both"
+    is_cached: bool = False
+    available_s3: bool = False
+
+class ModelDownloadRequest(BaseModel):
+    model_id: str
+    revision: Optional[str] = None
+    make_public: bool = False
+    metadata_only: bool = True
+
+class ModelCard(BaseModel):
+    content: str
+
+class ModelConfig(BaseModel):
+    config: Dict[str, Any]
 
 class CodeExample(BaseModel):
     title: str
@@ -406,7 +440,8 @@ async def cache_dataset_endpoint(request: DatasetDownloadRequest, background_tas
                 revision=request.revision,
                 trust_remote_code=request.trust_remote_code,
                 make_public=request.make_public,
-                config=config
+                config=config,
+                skip_hf_card_fetch=True  # Skip HF card fetching in isolated server environment
             )
             
             if success:
@@ -523,17 +558,19 @@ async def get_dataset_card(
     dataset_id: str,
     config_name: Optional[str] = None,
     revision: Optional[str] = None,
+    try_huggingface: bool = False,
     request: Request = None
 ):
     """Get dataset card content"""
     try:
         config = get_config_from_request(request)
         
-        # Try to get cached card first
+        # First try to get cached card content (local cache and S3)
         card_content = get_cached_dataset_card_content(dataset_id, config_name, revision, config=config)
         
-        if not card_content:
-            # Try to fetch from Hugging Face
+        # Only try Hugging Face if explicitly requested and no cached content found
+        if not card_content and try_huggingface:
+            print(f"Attempting to fetch dataset card from Hugging Face for {dataset_id}")
             card_content = get_dataset_card_content(dataset_id, revision)
         
         if not card_content:
@@ -753,6 +790,216 @@ else:
         title="Advanced ZIP Loading",
         description="Comprehensive method to load datasets from ZIP with auto-detection of file formats (Parquet, JSON, CSV)",
         code=zip_alt_code
+    ))
+    
+    return examples
+
+# Model endpoints
+@app.get("/api/models/cached", response_model=List[ModelInfo])
+async def get_cached_models(request: Request):
+    """Get list of cached models that match the current S3 bucket configuration"""
+    try:
+        config = get_config_from_request(request)
+        public_only = is_public_access_only(config)
+        # Filter models by bucket configuration to only show models from the current bucket
+        models = list_local_models(config=config, public_access_only=public_only, filter_by_bucket=True)
+        return [
+            ModelInfo(
+                model_id=model["model_id"],
+                revision=model.get("revision"),
+                path=model.get("path"),
+                has_card=model.get("has_card", False),
+                has_config=model.get("has_config", False),
+                has_tokenizer=model.get("has_tokenizer", False),
+                is_full_model=model.get("is_full_model", False),
+                source="cached",
+                is_cached=True,
+                available_s3=False
+            )
+            for model in models
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing cached models: {str(e)}")
+
+@app.post("/api/models/cache")
+async def cache_model_endpoint(request: ModelDownloadRequest, background_tasks: BackgroundTasks, req: Request):
+    """Cache a model on the server"""
+    config = get_config_from_request(req)
+    
+    if not config or (not config.s3_bucket_name and request.make_public):
+        raise HTTPException(status_code=400, detail="S3 bucket required for making models public")
+    
+    async def cache_task():
+        try:
+            download_type = "metadata" if request.metadata_only else "full model"
+            await manager.broadcast(f"Starting caching of {download_type} for {request.model_id}...")
+            
+            success, message = download_model_metadata(
+                model_id=request.model_id,
+                revision=request.revision,
+                make_public=request.make_public,
+                config=config,
+                skip_hf_fetch=True,  # Skip HF fetch in isolated server environment
+                metadata_only=request.metadata_only
+            )
+            
+            if success:
+                await manager.broadcast(f"Successfully cached {download_type} for {request.model_id}")
+            else:
+                await manager.broadcast(f"Failed to cache {download_type} for {request.model_id}: {message}")
+                
+        except Exception as e:
+            await manager.broadcast(f"Error caching {request.model_id}: {str(e)}")
+    
+    background_tasks.add_task(cache_task)
+    return {"message": "Caching started", "model_id": request.model_id}
+
+@app.get("/api/models/{model_id:path}/card")
+async def get_model_card(
+    model_id: str,
+    revision: Optional[str] = None,
+    try_huggingface: bool = False,
+    request: Request = None
+):
+    """Get model card content"""
+    try:
+        config = get_config_from_request(request)
+        
+        # First try to get cached card content (local cache and S3)
+        card_content = get_cached_model_card_content(model_id, revision, config=config)
+        
+        # Only try Hugging Face if explicitly requested and no cached content found
+        if not card_content and try_huggingface:
+            print(f"Attempting to fetch model card from Hugging Face for {model_id}")
+            card_content = get_model_card_content(model_id, revision)
+        
+        if not card_content:
+            raise HTTPException(status_code=404, detail="Model card not found")
+        
+        return ModelCard(content=card_content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching model card: {str(e)}")
+
+@app.get("/api/models/{model_id:path}/config")
+async def get_model_config(
+    model_id: str,
+    revision: Optional[str] = None,
+    try_huggingface: bool = False,
+    request: Request = None
+):
+    """Get model config content"""
+    try:
+        config = get_config_from_request(request)
+        
+        # First try to get cached config content (local cache and S3)
+        config_content = get_cached_model_config_content(model_id, revision, config=config)
+        
+        # Only try Hugging Face if explicitly requested and no cached content found
+        if not config_content and try_huggingface:
+            print(f"Attempting to fetch model config from Hugging Face for {model_id}")
+            config_content = get_model_config_content(model_id, revision)
+        
+        if not config_content:
+            raise HTTPException(status_code=404, detail="Model config not found")
+        
+        return ModelConfig(config=config_content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching model config: {str(e)}")
+
+@app.get("/api/models/{model_id:path}/examples", response_model=List[CodeExample])
+async def get_model_examples(
+    model_id: str,
+    revision: Optional[str] = None
+):
+    """Get code examples for using the model"""
+    examples = []
+    
+    # Convert model_id back to original format for Hugging Face operations
+    original_model_id = model_id.replace('_', '/')
+    
+    # Basic loading example
+    revision_part = f", revision='{revision}'" if revision else ""
+    
+    basic_code = f"""from hg_localization import get_cached_model_card_content, get_cached_model_config_content
+
+# Load the model metadata from local cache
+card_content = get_cached_model_card_content(
+    model_id='{original_model_id}'{revision_part}
+)
+
+config_content = get_cached_model_config_content(
+    model_id='{original_model_id}'{revision_part}
+)
+
+if card_content:
+    print("Model card loaded successfully!")
+    print(card_content[:200] + "...")
+
+if config_content:
+    print(f"Model type: {{config_content.get('model_type')}}")
+    print(f"Architecture: {{config_content.get('architectures', [])}}")"""
+    
+    examples.append(CodeExample(
+        title="Load Model Metadata",
+        description="Load the model card and config from local cache using hg_localization",
+        code=basic_code
+    ))
+    
+    # Download example
+    download_code = f"""from hg_localization import download_model_metadata
+
+# Download model metadata from Hugging Face and cache locally
+success, path = download_model_metadata(
+    model_id='{original_model_id}'{revision_part},
+    metadata_only=True  # Only download metadata (fast)
+)
+
+if success:
+    print(f"Model metadata downloaded to: {{path}}")
+else:
+    print(f"Download failed: {{path}}")"""
+    
+    examples.append(CodeExample(
+        title="Download Model Metadata",
+        description="Download the model metadata from Hugging Face Hub",
+        code=download_code
+    ))
+    
+    # Full model download example
+    full_download_code = f"""from hg_localization import download_model_metadata
+
+# Download full model (including weights and tokenizer)
+success, path = download_model_metadata(
+    model_id='{original_model_id}'{revision_part},
+    metadata_only=False  # Download full model (large!)
+)
+
+if success:
+    print(f"Full model downloaded to: {{path}}")
+else:
+    print(f"Download failed: {{path}}")"""
+    
+    examples.append(CodeExample(
+        title="Download Full Model",
+        description="Download the complete model including weights and tokenizer",
+        code=full_download_code
+    ))
+    
+    # Direct Hugging Face usage
+    hf_code = f"""from transformers import AutoModel, AutoTokenizer, AutoConfig
+
+# Load directly from Hugging Face Hub
+model = AutoModel.from_pretrained('{original_model_id}'{revision_part})
+tokenizer = AutoTokenizer.from_pretrained('{original_model_id}'{revision_part})
+config = AutoConfig.from_pretrained('{original_model_id}'{revision_part})
+
+print(f"Model loaded: {{type(model).__name__}}")
+print(f"Tokenizer vocab size: {{tokenizer.vocab_size}}")"""
+    
+    examples.append(CodeExample(
+        title="Direct Hugging Face Usage",
+        description="Load the model directly from Hugging Face Hub using transformers",
+        code=hf_code
     ))
     
     return examples

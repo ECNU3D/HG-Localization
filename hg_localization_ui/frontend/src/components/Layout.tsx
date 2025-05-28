@@ -1,6 +1,6 @@
 import React, { ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Database, Settings, Home, Github } from 'lucide-react';
+import { Database, Settings, Home, Github, Brain } from 'lucide-react';
 import { useConfigStatus } from '../hooks/useConfig';
 
 interface LayoutProps {
@@ -16,6 +16,12 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
       name: 'Datasets',
       href: '/datasets',
       icon: Database,
+      disabled: !configStatus?.configured,
+    },
+    {
+      name: 'Models',
+      href: '/models',
+      icon: Brain,
       disabled: !configStatus?.configured,
     },
     {

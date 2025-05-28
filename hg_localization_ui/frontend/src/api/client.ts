@@ -8,6 +8,10 @@ import {
   CodeExample,
   DatasetCard,
   HealthStatus,
+  ModelInfo,
+  ModelDownloadRequest,
+  ModelCard,
+  ModelConfig,
 } from '../types';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
@@ -118,6 +122,45 @@ export const api = {
       if (revision) params.append('revision', revision);
       
       return apiClient.get(`/datasets/${encodeURIComponent(datasetId)}/examples?${params}`);
+    },
+  },
+
+  // Model endpoints
+  models: {
+    getCached: (): Promise<AxiosResponse<ModelInfo[]>> =>
+      apiClient.get('/models/cached'),
+    
+    cache: (request: ModelDownloadRequest): Promise<AxiosResponse<{ message: string; model_id: string }>> =>
+      apiClient.post('/models/cache', request),
+    
+    getCard: (
+      modelId: string,
+      revision?: string
+    ): Promise<AxiosResponse<ModelCard>> => {
+      const params = new URLSearchParams();
+      if (revision) params.append('revision', revision);
+      
+      return apiClient.get(`/models/${encodeURIComponent(modelId)}/card?${params}`);
+    },
+    
+    getConfig: (
+      modelId: string,
+      revision?: string
+    ): Promise<AxiosResponse<ModelConfig>> => {
+      const params = new URLSearchParams();
+      if (revision) params.append('revision', revision);
+      
+      return apiClient.get(`/models/${encodeURIComponent(modelId)}/config?${params}`);
+    },
+    
+    getExamples: (
+      modelId: string,
+      revision?: string
+    ): Promise<AxiosResponse<CodeExample[]>> => {
+      const params = new URLSearchParams();
+      if (revision) params.append('revision', revision);
+      
+      return apiClient.get(`/models/${encodeURIComponent(modelId)}/examples?${params}`);
     },
   },
 

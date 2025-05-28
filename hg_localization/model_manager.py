@@ -1,0 +1,613 @@
+import os
+import shutil
+import tempfile
+import json
+import requests
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Any
+
+from huggingface_hub import ModelCard, hf_hub_download
+from botocore.exceptions import ClientError
+
+from .config import HGLocalizationConfig, default_config
+from .utils import _get_safe_path_component, _restore_dataset_name, _zip_directory, _unzip_file
+from .s3_utils import (
+    _get_s3_client, _get_s3_prefix, _get_prefixed_s3_key,
+    _upload_directory_to_s3, _download_directory_from_s3,
+    _get_s3_public_url
+)
+
+# --- Path Utilities specific to model_manager ---
+
+def _get_model_path(model_id: str, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, is_public: bool = False) -> Path:
+    """Constructs the local storage path for a model version.
+    
+    Similar to dataset paths but for models.
+    """
+    if config is None:
+        config = default_config
+        
+    safe_model_id = _get_safe_path_component(model_id)
+    safe_revision = _get_safe_path_component(revision if revision else config.default_revision_name)
+    
+    # Use public store path if this is a public model
+    base_path = config.public_models_store_path if is_public else config.models_store_path
+    
+    # For bucket-specific storage, include bucket information in the path
+    if config.s3_bucket_name:
+        # Create a safe bucket identifier
+        safe_bucket_name = _get_safe_path_component(config.s3_bucket_name)
+        # Include endpoint URL hash if present to distinguish between different S3-compatible services
+        bucket_identifier = safe_bucket_name
+        if config.s3_endpoint_url:
+            import hashlib
+            endpoint_hash = hashlib.md5(config.s3_endpoint_url.encode()).hexdigest()[:8]
+            bucket_identifier = f"{safe_bucket_name}_{endpoint_hash}"
+        
+        return base_path / "by_bucket" / bucket_identifier / safe_model_id / safe_revision
+    else:
+        # When no bucket is configured, use the original path structure
+        return base_path / safe_model_id / safe_revision
+
+def _get_model_s3_prefix(model_id: str, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None) -> str:
+    """Get the S3 prefix for a model, including the data prefix."""
+    if config is None:
+        config = default_config
+        
+    safe_model_id = _get_safe_path_component(model_id)
+    safe_revision = _get_safe_path_component(revision if revision else config.default_revision_name)
+    
+    # Use models prefix instead of datasets
+    model_prefix = f"models/{safe_model_id}/{safe_revision}"
+    
+    if config.s3_data_prefix:
+        return f"{config.s3_data_prefix.rstrip('/')}/{model_prefix}"
+    return model_prefix
+
+def _store_model_bucket_metadata(model_id: str, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, is_public: bool = False) -> None:
+    """Store metadata about which S3 bucket/endpoint this model came from."""
+    if config is None:
+        config = default_config
+    
+    model_path = _get_model_path(model_id, revision, config, is_public)
+    metadata_path = model_path / ".hg_localization_bucket_metadata.json"
+    
+    # Create metadata about the source bucket
+    metadata = {
+        "s3_bucket_name": config.s3_bucket_name,
+        "s3_endpoint_url": config.s3_endpoint_url,
+        "s3_data_prefix": config.s3_data_prefix,
+        "cached_timestamp": json.dumps({"timestamp": str(Path(__file__).stat().st_mtime)}),
+        "is_public": is_public,
+        "type": "model"  # Distinguish from dataset metadata
+    }
+    
+    try:
+        os.makedirs(metadata_path.parent, exist_ok=True)
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2)
+        print(f"Stored bucket metadata for model {model_id} at {metadata_path}")
+    except Exception as e:
+        print(f"Warning: Failed to store bucket metadata for {model_id}: {e}")
+
+# --- Model Card Utilities ---
+
+def get_model_card_url(model_id: str) -> str:
+    """Constructs the URL to the model's card on the Hugging Face Hub."""
+    return f"https://huggingface.co/{model_id}"
+
+def get_model_card_content(model_id: str, revision: Optional[str] = None) -> Optional[str]:
+    """Fetches the Markdown content of a model card from the Hugging Face Hub."""
+    try:
+        print(f"Attempting to load model card for: {model_id} (revision: {revision or 'main'})")
+        # Try with revision first, fall back to without revision if not supported
+        try:
+            card = ModelCard.load(model_id, revision=revision)
+        except TypeError:
+            # revision parameter not supported in this version of huggingface_hub
+            print(f"Revision parameter not supported, loading default version for {model_id}")
+            card = ModelCard.load(model_id)
+        return card.text
+    except Exception as e:
+        print(f"Error loading model card for '{model_id}' (revision: {revision or 'main'}): {e}")
+        return None
+
+def get_model_config_content(model_id: str, revision: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Fetches the config.json content from the Hugging Face Hub."""
+    try:
+        print(f"Attempting to load model config for: {model_id} (revision: {revision or 'main'})")
+        config_path = hf_hub_download(
+            repo_id=model_id,
+            filename="config.json",
+            revision=revision,
+            cache_dir=None  # Don't use HF cache, we'll manage our own
+        )
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading model config for '{model_id}' (revision: {revision or 'main'}): {e}")
+        return None
+
+def get_cached_model_card_content(model_id: str, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None) -> Optional[str]:
+    """Retrieves model card content, prioritizing local cache, then private S3."""
+    if config is None:
+        config = default_config
+        
+    local_model_dir = _get_model_path(model_id, revision, config)
+    local_card_file_path = local_model_dir / "model_card.md"
+    version_str = f"(model: {model_id}, revision: {revision or 'default'})"
+
+    if local_card_file_path.exists() and local_card_file_path.is_file():
+        print(f"Found model card locally for {version_str} at {local_card_file_path}")
+        try:
+            with open(local_card_file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except IOError as e:
+            print(f"Error reading local model card {local_card_file_path}: {e}")
+
+    print(f"Model card not found or readable locally for {version_str}. Checking S3 (private path)...")
+    s3_client = _get_s3_client(config)
+    if s3_client and config.s3_bucket_name:
+        s3_prefix_path = _get_model_s3_prefix(model_id, revision, config)
+        s3_card_key = f"{s3_prefix_path.rstrip('/')}/model_card.md"
+        
+        try:
+            print(f"Attempting to download model card from S3: s3://{config.s3_bucket_name}/{s3_card_key}")
+            os.makedirs(local_model_dir, exist_ok=True)
+            s3_client.download_file(config.s3_bucket_name, s3_card_key, str(local_card_file_path))
+            print(f"Successfully downloaded model card from S3 to {local_card_file_path}")
+            with open(local_card_file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except ClientError as e:
+            if e.response.get('Error', {}).get('Code') == '404':
+                print(f"Model card not found on S3 at {s3_card_key}")
+            else:
+                print(f"S3 ClientError when trying to download model card {s3_card_key}: {e}")
+        except IOError as e:
+            print(f"IOError after downloading model card from S3 {local_card_file_path}: {e}")
+        except Exception as e:
+            print(f"Unexpected error downloading/reading model card from S3 {s3_card_key}: {e}")
+    else:
+        print("S3 client not available or bucket not configured. Cannot fetch model card from S3.")
+    return None
+
+def get_cached_model_config_content(model_id: str, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None) -> Optional[Dict[str, Any]]:
+    """Retrieves model config content, prioritizing local cache, then private S3."""
+    if config is None:
+        config = default_config
+        
+    local_model_dir = _get_model_path(model_id, revision, config)
+    local_config_file_path = local_model_dir / "config.json"
+    version_str = f"(model: {model_id}, revision: {revision or 'default'})"
+
+    if local_config_file_path.exists() and local_config_file_path.is_file():
+        print(f"Found model config locally for {version_str} at {local_config_file_path}")
+        try:
+            with open(local_config_file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"Error reading local model config {local_config_file_path}: {e}")
+
+    print(f"Model config not found or readable locally for {version_str}. Checking S3 (private path)...")
+    s3_client = _get_s3_client(config)
+    if s3_client and config.s3_bucket_name:
+        s3_prefix_path = _get_model_s3_prefix(model_id, revision, config)
+        s3_config_key = f"{s3_prefix_path.rstrip('/')}/config.json"
+        
+        try:
+            print(f"Attempting to download model config from S3: s3://{config.s3_bucket_name}/{s3_config_key}")
+            os.makedirs(local_model_dir, exist_ok=True)
+            s3_client.download_file(config.s3_bucket_name, s3_config_key, str(local_config_file_path))
+            print(f"Successfully downloaded model config from S3 to {local_config_file_path}")
+            with open(local_config_file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except ClientError as e:
+            if e.response.get('Error', {}).get('Code') == '404':
+                print(f"Model config not found on S3 at {s3_config_key}")
+            else:
+                print(f"S3 ClientError when trying to download model config {s3_config_key}: {e}")
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"Error after downloading model config from S3 {local_config_file_path}: {e}")
+        except Exception as e:
+            print(f"Unexpected error downloading/reading model config from S3 {s3_config_key}: {e}")
+    else:
+        print("S3 client not available or bucket not configured. Cannot fetch model config from S3.")
+    return None
+
+# --- Full Model Download Utilities ---
+
+def _download_full_model_from_hf(model_id: str, revision: Optional[str], local_save_path: Path) -> bool:
+    """Downloads the full model (weights, tokenizer, etc.) from Hugging Face Hub.
+    
+    This function is a placeholder for full model download functionality.
+    In a complete implementation, this would use transformers library to download
+    all model files including weights, tokenizer, and other necessary files.
+    
+    Args:
+        model_id: The model ID on Hugging Face Hub
+        revision: Git revision (branch, tag, commit hash)
+        local_save_path: Local path to save the model
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        from transformers import AutoModel, AutoTokenizer, AutoConfig
+        
+        print(f"Downloading model components for {model_id}...")
+        
+        # Download config first
+        try:
+            config = AutoConfig.from_pretrained(model_id, revision=revision)
+            config.save_pretrained(str(local_save_path))
+            print(f"✓ Downloaded model config")
+        except Exception as e:
+            print(f"Warning: Failed to download config: {e}")
+        
+        # Download tokenizer if available
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision)
+            tokenizer.save_pretrained(str(local_save_path))
+            print(f"✓ Downloaded tokenizer")
+        except Exception as e:
+            print(f"Warning: Failed to download tokenizer: {e}")
+        
+        # Download model weights
+        try:
+            # Note: This will download the full model weights
+            # For large models, this could take a very long time and use significant disk space
+            print(f"⚠️  WARNING: Downloading full model weights for {model_id}. This may take a long time and use significant disk space.")
+            model = AutoModel.from_pretrained(model_id, revision=revision)
+            model.save_pretrained(str(local_save_path))
+            print(f"✓ Downloaded model weights")
+        except Exception as e:
+            print(f"Error: Failed to download model weights: {e}")
+            return False
+        
+        # Also download the model card for completeness
+        try:
+            card_content = get_model_card_content(model_id, revision=revision)
+            if card_content:
+                card_file_path = local_save_path / "model_card.md"
+                with open(card_file_path, "w", encoding="utf-8") as f:
+                    f.write(card_content)
+                print(f"✓ Downloaded model card")
+        except Exception as e:
+            print(f"Warning: Failed to download model card: {e}")
+        
+        print(f"✓ Full model download completed for {model_id}")
+        return True
+        
+    except ImportError:
+        print("Error: transformers library is required for full model download. Install with: pip install transformers")
+        return False
+    except Exception as e:
+        print(f"Error downloading full model: {e}")
+        return False
+
+# --- Core Public API Functions ---
+
+def download_model_metadata(model_id: str, revision: Optional[str] = None, make_public: bool = False, skip_s3_upload: bool = False, config: Optional[HGLocalizationConfig] = None, skip_hf_fetch: bool = False, metadata_only: bool = True) -> Tuple[bool, str]:
+    """Downloads model metadata (card and config) or full model from Hugging Face, caches locally, and uploads to S3 if configured.
+    
+    Args:
+        model_id: The model ID on Hugging Face Hub
+        revision: Git revision (branch, tag, commit hash)
+        make_public: Whether to make the model public on S3
+        skip_s3_upload: Whether to skip uploading to S3
+        config: Configuration object
+        skip_hf_fetch: Whether to skip fetching from Hugging Face
+        metadata_only: If True, only download metadata (card + config). If False, download full model.
+    
+    Returns:
+        Tuple of (success: bool, path_or_error: str)
+    """
+    if config is None:
+        config = default_config
+        
+    version_str = f"(revision: {revision or 'default'})"
+    download_type = "metadata" if metadata_only else "full model"
+    print(f"Processing {download_type}: {model_id} {version_str}")
+    
+    # Determine if this should be saved to public cache
+    save_to_public = make_public
+    local_save_path = _get_model_path(model_id, revision, config, is_public=save_to_public)
+
+    # Check if the target model already exists in the intended location
+    def _check_model_exists(path: Path) -> bool:
+        if not path.exists():
+            return False
+        
+        if metadata_only:
+            # For metadata-only, check for card or config
+            return ((path / "model_card.md").exists() or (path / "config.json").exists())
+        else:
+            # For full model, check for more comprehensive files
+            # This is a basic check - could be enhanced based on model type
+            has_config = (path / "config.json").exists()
+            has_weights = any(path.glob("*.bin")) or any(path.glob("*.safetensors")) or (path / "pytorch_model.bin").exists()
+            return has_config and (has_weights or (path / "model.safetensors").exists())
+
+    if save_to_public:
+        # For public cache, only check the public path
+        if _check_model_exists(local_save_path):
+            print(f"Model {download_type} {model_id} {version_str} already exists in public cache at {local_save_path}")
+            return True, str(local_save_path)
+    else:
+        # For private cache, check public path first (preferred), then private path
+        public_path = _get_model_path(model_id, revision, config, is_public=True)
+        private_path = _get_model_path(model_id, revision, config, is_public=False)
+        
+        # Check public path first
+        if _check_model_exists(public_path):
+            print(f"Model {download_type} {model_id} {version_str} already exists in public cache at {public_path}")
+            return True, str(public_path)
+        
+        # Then check private path
+        if _check_model_exists(private_path):
+            print(f"Model {download_type} {model_id} {version_str} already exists in private cache at {private_path}")
+            return True, str(private_path)
+
+    # Check S3 for existing model data
+    s3_client = _get_s3_client(config)
+    if s3_client and config.s3_bucket_name:
+        s3_prefix_path_for_model = _get_model_s3_prefix(model_id, revision, config)
+        print(f"Checking S3 for {download_type} {model_id} {version_str} at s3://{config.s3_bucket_name}/{s3_prefix_path_for_model}...")
+        
+        # Check what exists on S3 based on download type
+        if metadata_only:
+            # For metadata-only, check for card or config
+            card_exists = False
+            config_exists = False
+            try:
+                s3_client.head_object(Bucket=config.s3_bucket_name, Key=f"{s3_prefix_path_for_model}/model_card.md")
+                card_exists = True
+            except ClientError:
+                pass
+            
+            try:
+                s3_client.head_object(Bucket=config.s3_bucket_name, Key=f"{s3_prefix_path_for_model}/config.json")
+                config_exists = True
+            except ClientError:
+                pass
+            
+            s3_has_data = card_exists or config_exists
+        else:
+            # For full model, check for config and at least one weight file
+            # This is a simplified check - in practice, you'd want more sophisticated detection
+            config_exists = False
+            weights_exist = False
+            
+            try:
+                s3_client.head_object(Bucket=config.s3_bucket_name, Key=f"{s3_prefix_path_for_model}/config.json")
+                config_exists = True
+            except ClientError:
+                pass
+            
+            # Check for common weight file patterns
+            weight_patterns = ["pytorch_model.bin", "model.safetensors", "pytorch_model-00001-of-*.bin"]
+            for pattern in weight_patterns:
+                try:
+                    s3_client.head_object(Bucket=config.s3_bucket_name, Key=f"{s3_prefix_path_for_model}/{pattern}")
+                    weights_exist = True
+                    break
+                except ClientError:
+                    continue
+            
+            s3_has_data = config_exists and weights_exist
+        
+        if s3_has_data:
+            print(f"Model {download_type} found on S3. Attempting to download from S3 to local cache: {local_save_path}...")
+            if _download_directory_from_s3(s3_client, local_save_path, config.s3_bucket_name, s3_prefix_path_for_model):
+                print(f"Successfully downloaded {download_type} from S3 to {local_save_path}.")
+                if _check_model_exists(local_save_path):
+                    # Store bucket metadata for the downloaded model
+                    _store_model_bucket_metadata(model_id, revision, config, is_public=save_to_public)
+                    return True, str(local_save_path)
+                else:
+                    print(f"Error: S3 download reported success, but {download_type} not found or incomplete at {local_save_path}. Proceeding to Hugging Face.")
+            else:
+                print(f"Failed to download {download_type} from S3. Will attempt Hugging Face download.")
+        else:
+            print(f"Model {download_type} not found on S3. Will attempt Hugging Face download.")
+    else:
+        print("S3 not configured or client init failed; skipping S3 check.")
+
+    # Download from Hugging Face
+    revision_str_part = f" (revision: {revision})" if revision else ""
+    print(f"Downloading {download_type} '{model_id}' from Hugging Face{revision_str_part}...")
+    
+    try:
+        os.makedirs(local_save_path, exist_ok=True)
+        
+        if not skip_hf_fetch:
+            if metadata_only:
+                # Download only metadata (card + config)
+                print(f"Downloading metadata only for {model_id}...")
+                
+                # Download model card
+                card_content_md = get_model_card_content(model_id, revision=revision)
+                if card_content_md:
+                    card_file_path = local_save_path / "model_card.md"
+                    try:
+                        with open(card_file_path, "w", encoding="utf-8") as f:
+                            f.write(card_content_md)
+                        print(f"Successfully saved model card to {card_file_path}")
+                    except IOError as e:
+                        print(f"Warning: Failed to save model card to {card_file_path}: {e}")
+                else:
+                    print(f"Warning: Could not retrieve model card for {model_id} {version_str}.")
+                
+                # Download model config
+                config_content = get_model_config_content(model_id, revision=revision)
+                if config_content:
+                    config_file_path = local_save_path / "config.json"
+                    try:
+                        with open(config_file_path, "w", encoding="utf-8") as f:
+                            json.dump(config_content, f, indent=2)
+                        print(f"Successfully saved model config to {config_file_path}")
+                    except IOError as e:
+                        print(f"Warning: Failed to save model config to {config_file_path}: {e}")
+                else:
+                    print(f"Warning: Could not retrieve model config for {model_id} {version_str}.")
+            else:
+                # Download full model
+                print(f"Downloading full model for {model_id}...")
+                success = _download_full_model_from_hf(model_id, revision, local_save_path)
+                if not success:
+                    raise Exception("Failed to download full model from Hugging Face")
+        else:
+            print(f"Skipping Hugging Face {download_type} fetch for {model_id} {version_str} (isolated environment mode).")
+
+        print(f"Model {download_type} '{model_id}' {version_str} successfully saved to local cache: {local_save_path}")
+        
+        # Store bucket metadata for the downloaded model
+        _store_model_bucket_metadata(model_id, revision, config, is_public=save_to_public)
+
+        # Upload to S3 if configured and not skipped
+        if not skip_s3_upload:
+            s3_client_for_upload = _get_s3_client(config)
+            if s3_client_for_upload and config.s3_bucket_name:
+                s3_prefix_path_for_upload = _get_model_s3_prefix(model_id, revision, config)
+                _upload_directory_to_s3(s3_client_for_upload, local_save_path, config.s3_bucket_name, s3_prefix_path_for_upload)
+                
+                # TODO: Implement public model metadata functionality similar to datasets
+                if make_public:
+                    print(f"Making model metadata public is not yet implemented for {model_id} {version_str}")
+        
+        return True, str(local_save_path)
+
+    except Exception as e:
+        print(f"An error occurred while processing '{model_id}' {version_str}: {e}")
+        if local_save_path.exists():
+            try:
+                shutil.rmtree(local_save_path)
+                print(f"Cleaned up partially saved data at {local_save_path}")
+            except Exception as cleanup_e:
+                print(f"Error during cleanup of {local_save_path}: {cleanup_e}")
+        return False, str(e)
+
+def list_local_models(config: Optional[HGLocalizationConfig] = None, public_access_only: bool = False, filter_by_bucket: bool = True) -> List[Dict[str, str]]:
+    """Lists models available in the local cache."""
+    if config is None:
+        config = default_config
+        
+    available_models = []
+    
+    # Determine which directories to scan based on access mode
+    if public_access_only:
+        # Public access only - scan public directory only
+        if config.public_models_store_path.exists():
+            directories_to_scan = [(config.public_models_store_path, True)]
+            print(f"Public access mode: scanning public models only")
+        else:
+            print(f"Local model store directory does not exist: {config.public_models_store_path}")
+            return available_models
+    else:
+        # Private access - scan both public and private directories
+        directories_to_scan = []
+        if config.public_models_store_path.exists():
+            directories_to_scan.append((config.public_models_store_path, True))
+        if config.models_store_path.exists():
+            directories_to_scan.append((config.models_store_path, False))
+        print(f"Private access mode: scanning both public and private models")
+        
+        if not directories_to_scan:
+            print(f"Local model store directory does not exist: {config.models_store_path}")
+            return available_models
+    
+    for store_path, is_public_store in directories_to_scan:
+        models_from_store = _scan_model_directory(store_path, config, is_public_store, filter_by_bucket)
+        
+        # Merge models, handling duplicates (prefer public over private)
+        for model_info in models_from_store:
+            # Check for duplicates (same model in both public and private)
+            # Prefer public version if it exists
+            existing_idx = None
+            for i, existing in enumerate(available_models):
+                if (existing["model_id"] == model_info["model_id"] and 
+                    existing["revision"] == model_info["revision"]):
+                    existing_idx = i
+                    break
+            
+            if existing_idx is not None:
+                # Model already exists, prefer public version
+                if is_public_store:
+                    available_models[existing_idx] = model_info
+            else:
+                available_models.append(model_info)
+    
+    if not available_models:
+        print("No local models found in cache.")
+    else:
+        print(f"Found {len(available_models)} local model(s):")
+        for model_info in available_models:
+            model_type = "Full Model" if model_info.get('is_full_model', False) else "Metadata Only"
+            print(f"  Model ID: {model_info['model_id']}, "
+                  f"Revision: {model_info.get('revision', config.default_revision_name)}, "
+                  f"Type: {model_type}, "
+                  f"Path: {model_info['path']}, "
+                  f"Card: {'Yes' if model_info['has_card'] else 'No'}, "
+                  f"Config: {'Yes' if model_info['has_config'] else 'No'}")
+    return available_models
+
+def _scan_model_directory(store_path: Path, config: HGLocalizationConfig, is_public_store: bool, filter_by_bucket: bool, include_legacy: bool = True) -> List[Dict[str, str]]:
+    """Scan a model directory for both new bucket-specific and legacy storage structures."""
+    models = []
+    
+    if not store_path.exists():
+        return models
+    
+    # Scan new bucket-specific structure: store_path/by_bucket/bucket_id/model_id/revision
+    if config.s3_bucket_name:
+        by_bucket_path = store_path / "by_bucket"
+        if by_bucket_path.exists():
+            for bucket_dir in by_bucket_path.iterdir():
+                if bucket_dir.is_dir() and not bucket_dir.name.startswith("."):
+                    models.extend(_scan_legacy_model_structure(bucket_dir, config, is_public_store, filter_by_bucket))
+    
+    # Scan legacy structure: store_path/model_id/revision (for backward compatibility)
+    if include_legacy:
+        models.extend(_scan_legacy_model_structure(store_path, config, is_public_store, filter_by_bucket))
+    
+    return models
+
+def _scan_legacy_model_structure(base_path: Path, config: HGLocalizationConfig, is_public_store: bool, filter_by_bucket: bool) -> List[Dict[str, str]]:
+    """Scan the legacy model storage structure."""
+    models = []
+    
+    for model_id_dir in base_path.iterdir():
+        if model_id_dir.is_dir() and not model_id_dir.name.startswith(".") and model_id_dir.name != "by_bucket":
+            for revision_dir in model_id_dir.iterdir():
+                if revision_dir.is_dir():
+                    # Check if this directory contains model metadata
+                    has_card = (revision_dir / "model_card.md").is_file()
+                    has_config = (revision_dir / "config.json").is_file()
+                    
+                    if has_card or has_config:
+                        # Convert safe names back to original format
+                        model_id_display = _restore_dataset_name(model_id_dir.name)  # Reuse the same function
+                        revision_display = revision_dir.name
+                        
+                        # Check if this is a full model or metadata-only
+                        has_weights = any(revision_dir.glob("*.bin")) or any(revision_dir.glob("*.safetensors")) or (revision_dir / "pytorch_model.bin").exists()
+                        has_tokenizer = (revision_dir / "tokenizer.json").exists() or (revision_dir / "tokenizer_config.json").exists()
+                        is_full_model = has_config and (has_weights or (revision_dir / "model.safetensors").exists())
+                        
+                        # TODO: Implement bucket filtering for models if needed
+                        # For now, include all models
+                        
+                        model_info = {
+                            "model_id": model_id_display,
+                            "revision": revision_display if revision_display != config.default_revision_name else None,
+                            "path": str(revision_dir),
+                            "has_card": has_card,
+                            "has_config": has_config,
+                            "has_tokenizer": has_tokenizer,
+                            "is_full_model": is_full_model,
+                            "is_public": is_public_store
+                        }
+                        models.append(model_info)
+    
+    return models 

@@ -6,3 +6,6 @@ pytest-cov
 boto3 
 botocore
 python-dotenv
+transformers
+torch
+hf_xet

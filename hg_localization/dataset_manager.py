@@ -241,7 +241,7 @@ def get_cached_dataset_card_content(dataset_id: str, config_name: Optional[str] 
 
 # --- Core Public API Functions ---
 
-def download_dataset(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, trust_remote_code: bool = False, make_public: bool = False, skip_s3_upload: bool = False, config: Optional[HGLocalizationConfig] = None, force_public_cache: bool = False) -> Tuple[bool, str]:
+def download_dataset(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, trust_remote_code: bool = False, make_public: bool = False, skip_s3_upload: bool = False, config: Optional[HGLocalizationConfig] = None, force_public_cache: bool = False, skip_hf_card_fetch: bool = False) -> Tuple[bool, str]:
     if config is None:
         config = default_config
         
@@ -396,17 +396,21 @@ def download_dataset(dataset_id: str, config_name: Optional[str] = None, revisio
         # Store bucket metadata for the downloaded dataset
         _store_dataset_bucket_metadata(dataset_id, config_name, revision, config, is_public=save_to_public)
 
-        card_content_md = get_dataset_card_content(dataset_id, revision=revision)
-        if card_content_md:
-            card_file_path = local_save_path / "dataset_card.md"
-            try:
-                with open(card_file_path, "w", encoding="utf-8") as f:
-                    f.write(card_content_md)
-                print(f"Successfully saved dataset card to {card_file_path}")
-            except IOError as e:
-                print(f"Warning: Failed to save dataset card to {card_file_path}: {e}")
+        # Try to fetch dataset card from Hugging Face (only if not skipped - e.g., when called from CLI with HF access)
+        if not skip_hf_card_fetch:
+            card_content_md = get_dataset_card_content(dataset_id, revision=revision)
+            if card_content_md:
+                card_file_path = local_save_path / "dataset_card.md"
+                try:
+                    with open(card_file_path, "w", encoding="utf-8") as f:
+                        f.write(card_content_md)
+                    print(f"Successfully saved dataset card to {card_file_path}")
+                except IOError as e:
+                    print(f"Warning: Failed to save dataset card to {card_file_path}: {e}")
+            else:
+                print(f"Warning: Could not retrieve dataset card for {dataset_id} {version_str}. It will not be saved locally or to S3.")
         else:
-            print(f"Warning: Could not retrieve dataset card for {dataset_id} {version_str}. It will not be saved locally or to S3.")
+            print(f"Skipping Hugging Face dataset card fetch for {dataset_id} {version_str} (isolated environment mode).")
 
         if skip_s3_upload:
             print(f"Skipping S3 upload for {dataset_id} {version_str} as requested.")
@@ -597,13 +601,70 @@ def upload_dataset(dataset_obj: Dataset | DatasetDict, dataset_id: str, config_n
         
     version_str = f"(config: {config_name or 'default'}, revision: {revision or 'default'})"
     print(f"Processing dataset for upload: {dataset_id} {version_str}")
-    local_save_path = _get_dataset_path(dataset_id, config_name, revision, config)
+    local_save_path = _get_dataset_path(dataset_id, config_name, revision, config, is_public=make_public)
 
     try:
         print(f"Saving dataset to local cache at {local_save_path}...")
         os.makedirs(local_save_path, exist_ok=True)
         dataset_obj.save_to_disk(str(local_save_path))
         print(f"Dataset '{dataset_id}' {version_str} successfully saved to local cache: {local_save_path}")
+        
+        # Store bucket metadata for the uploaded dataset to ensure it's properly tracked
+        _store_dataset_bucket_metadata(dataset_id, config_name, revision, config, is_public=make_public)
+        
+        # Create a basic dataset card for uploaded datasets
+        card_file_path = local_save_path / "dataset_card.md"
+        if not card_file_path.exists():
+            try:
+                card_content = f"""# {dataset_id}
+
+## Dataset Description
+
+This dataset was uploaded locally using the HG-Localization library.
+
+**Configuration:** {config_name or 'default'}  
+**Revision:** {revision or 'default'}  
+**Upload Type:** {'Public' if make_public else 'Private'}
+
+## Dataset Structure
+
+This dataset contains the following features:
+"""
+                # Try to add feature information if available
+                if hasattr(dataset_obj, 'features'):
+                    # Single Dataset
+                    for feature_name, feature_type in dataset_obj.features.items():
+                        card_content += f"- **{feature_name}**: {feature_type}\n"
+                elif hasattr(dataset_obj, 'column_names'):
+                    # DatasetDict - use first split
+                    first_split = list(dataset_obj.keys())[0]
+                    for feature_name, feature_type in dataset_obj[first_split].features.items():
+                        card_content += f"- **{feature_name}**: {feature_type}\n"
+                
+                card_content += f"""
+## Usage
+
+```python
+from hg_localization import load_local_dataset
+
+# Load the dataset
+dataset = load_local_dataset(
+    dataset_id='{dataset_id}',
+    config_name='{config_name or 'default'}',
+    revision='{revision or 'default'}'
+)
+```
+
+---
+*This dataset card was automatically generated by HG-Localization.*
+"""
+                
+                with open(card_file_path, "w", encoding="utf-8") as f:
+                    f.write(card_content)
+                print(f"Created dataset card at {card_file_path}")
+            except Exception as e:
+                print(f"Warning: Failed to create dataset card at {card_file_path}: {e}")
+        
     except Exception as e:
         print(f"Error saving dataset '{dataset_id}' {version_str} to {local_save_path}: {e}")
         return False

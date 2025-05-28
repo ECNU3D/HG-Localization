@@ -153,6 +153,7 @@ dmypy.json
 cython_debug/
 
 hg_localization/datasets_store/*
+hg_localization/models_store/*
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

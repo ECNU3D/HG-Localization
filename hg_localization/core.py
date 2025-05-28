@@ -34,6 +34,17 @@ from .dataset_manager import (
     get_cached_dataset_card_content
 )
 
+# Import primary public API functions from model_manager
+from .model_manager import (
+    download_model_metadata,
+    list_local_models,
+    get_model_card_url,
+    get_model_card_content,
+    get_cached_model_card_content,
+    get_model_config_content,
+    get_cached_model_config_content
+)
+
 # Define __all__ for explicit public API exposure
 __all__ = [
     # New configuration system
@@ -65,7 +76,18 @@ __all__ = [
     "get_dataset_card_url",
     "get_dataset_card_content",
     "get_cached_dataset_card_content",
-    "get_s3_dataset_card_presigned_url"
+    "get_s3_dataset_card_presigned_url",
+    
+    # Model Management Functions
+    "download_model_metadata",
+    "list_local_models",
+    
+    # Model Card and Config Utilities
+    "get_model_card_url",
+    "get_model_card_content",
+    "get_cached_model_card_content",
+    "get_model_config_content",
+    "get_cached_model_config_content"
 ]
 
 # Cleanup (optional - remove the old core.py if this is replacing it)

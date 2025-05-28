@@ -125,6 +125,42 @@
   color: #6f42c1;
 }
 
+/* Code syntax highlighting for Python/JavaScript */
+.code-pre {
+  color: #24292e;
+  background-color: #f6f8fa;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  padding: 16px;
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-x: auto;
+}
+
+.code-pre .code-keyword {
+  color: #d73a49;
+  font-weight: 600;
+}
+
+.code-pre .code-string {
+  color: #032f62;
+}
+
+.code-pre .code-comment {
+  color: #6a737d;
+  font-style: italic;
+}
+
+.code-pre .code-number {
+  color: #005cc5;
+}
+
+.code-pre .code-function {
+  color: #6f42c1;
+  font-weight: 600;
+}
+
 /* Loading animation */
 .loading-dots {
   display: inline-block;

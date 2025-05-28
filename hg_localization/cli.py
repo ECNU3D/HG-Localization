@@ -6,6 +6,13 @@ from .dataset_manager import (
     list_s3_datasets,
     sync_local_dataset_to_s3 # Ensure this is imported if used by a command
 )
+from .model_manager import (
+    download_model_metadata,
+    list_local_models,
+    get_model_card_content,
+    get_cached_model_card_content,
+    get_cached_model_config_content
+)
 # config might be imported if CLI needs direct access to config values, but usually not.
 # from .config import S3_BUCKET_NAME # Example, if needed
 
@@ -97,6 +104,97 @@ def sync_local_to_s3_cmd(dataset_id: str, name: str | None, revision: str | None
         click.secho(f"Successfully synced '{dataset_id}' (Config: {name or 'default'}, Revision: {revision or 'default'}). {message}", fg="green")
     else:
         click.secho(f"Failed to sync '{dataset_id}' (Config: {name or 'default'}, Revision: {revision or 'default'}). Error: {message}", fg="red")
+
+# --- Model Commands ---
+
+@cli.command("download-model")
+@click.argument('model_id')
+@click.option('--revision', '-r', default=None, help='The git revision (branch, tag, commit hash) of the model.')
+@click.option('--make-public', is_flag=True, help="Upload the model to a public S3 location.")
+@click.option('--no-s3-upload', is_flag=True, help="Disable uploading the model to S3, only cache locally.")
+@click.option('--full-model', is_flag=True, help="Download the full model (weights, tokenizer, etc.) instead of just metadata.")
+def download_model_cmd(model_id: str, revision: str | None, make_public: bool, no_s3_upload: bool, full_model: bool):
+    """Downloads model metadata (card and config) or full model from Hugging Face, caches locally, and uploads to S3 if configured."""
+    download_type = "full model" if full_model else "model metadata"
+    click.echo(f"Processing {download_type}: {model_id} (Revision: {revision or 'default'}, Make public: {make_public}, No S3 Upload: {no_s3_upload})...")
+    
+    if full_model:
+        click.echo(click.style("⚠️  WARNING: Full model download will download all model weights and may take a long time and use significant disk space.", fg="yellow"))
+        if not click.confirm("Do you want to continue?"):
+            click.echo("Download cancelled.")
+            return
+    
+    success, message = download_model_metadata(
+        model_id, 
+        revision=revision, 
+        make_public=make_public,
+        skip_s3_upload=no_s3_upload,
+        config=default_config,
+        metadata_only=not full_model
+    )
+    if success:
+        click.secho(f"Successfully processed {download_type} '{model_id}'. Local path: {message}", fg="green")
+        click.echo("Check S3 upload status in logs if S3 is configured.")
+    else:
+        click.secho(f"Failed to process {download_type} '{model_id}'. Error: {message}", fg="red")
+
+@cli.command("list-local-models")
+def list_local_models_cmd():
+    """Lists model metadata available in the local cache."""
+    click.echo("Listing local model metadata from cache...")
+    models = list_local_models(config=default_config)
+    if not models:
+        click.echo("No model metadata found in local cache.")
+        return
+    click.secho("Available local models (cache):", bold=True)
+    for model_info in models:
+        model_id = model_info.get('model_id', 'N/A')
+        rev = model_info.get('revision') or 'default'
+        has_card = 'Yes' if model_info.get('has_card') else 'No'
+        has_config = 'Yes' if model_info.get('has_config') else 'No'
+        model_type = "Full Model" if model_info.get('is_full_model', False) else "Metadata Only"
+        type_color = 'green' if model_info.get('is_full_model', False) else 'cyan'
+        click.echo(f"  - ID: {click.style(model_id, fg='blue')}, Revision: {click.style(rev, fg='yellow')}, Type: {click.style(model_type, fg=type_color)}, Card: {has_card}, Config: {has_config}")
+
+@cli.command("show-model-card")
+@click.argument('model_id')
+@click.option('--revision', '-r', default=None, help='The git revision of the model.')
+@click.option('--try-huggingface', is_flag=True, help="Try to fetch from Hugging Face if not found locally.")
+def show_model_card_cmd(model_id: str, revision: str | None, try_huggingface: bool):
+    """Shows the model card content for a cached model."""
+    click.echo(f"Retrieving model card for: {model_id} (Revision: {revision or 'default'})")
+    
+    # First try cached content
+    card_content = get_cached_model_card_content(model_id, revision=revision, config=default_config)
+    
+    # If not found and user wants to try HF
+    if not card_content and try_huggingface:
+        click.echo("Not found in cache, trying Hugging Face...")
+        card_content = get_model_card_content(model_id, revision=revision)
+    
+    if card_content:
+        click.echo("=" * 80)
+        click.echo(card_content)
+        click.echo("=" * 80)
+    else:
+        click.secho(f"Model card not found for '{model_id}' (Revision: {revision or 'default'})", fg="red")
+
+@cli.command("show-model-config")
+@click.argument('model_id')
+@click.option('--revision', '-r', default=None, help='The git revision of the model.')
+def show_model_config_cmd(model_id: str, revision: str | None):
+    """Shows the model config.json content for a cached model."""
+    click.echo(f"Retrieving model config for: {model_id} (Revision: {revision or 'default'})")
+    
+    config_content = get_cached_model_config_content(model_id, revision=revision, config=default_config)
+    
+    if config_content:
+        click.echo("=" * 80)
+        import json
+        click.echo(json.dumps(config_content, indent=2))
+        click.echo("=" * 80)
+    else:
+        click.secho(f"Model config not found for '{model_id}' (Revision: {revision or 'default'})", fg="red")
 
 if __name__ == '__main__':
     cli() 

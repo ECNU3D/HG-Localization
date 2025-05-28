@@ -54,6 +54,34 @@ export interface DatasetCard {
   content: string;
 }
 
+export interface ModelInfo {
+  model_id: string;
+  revision?: string;
+  path?: string;
+  has_card: boolean;
+  has_config: boolean;
+  has_tokenizer: boolean;
+  is_full_model: boolean;
+  source: 'cached' | 's3' | 'both';
+  is_cached: boolean;
+  available_s3: boolean;
+}
+
+export interface ModelDownloadRequest {
+  model_id: string;
+  revision?: string;
+  make_public: boolean;
+  metadata_only: boolean;
+}
+
+export interface ModelCard {
+  content: string;
+}
+
+export interface ModelConfig {
+  config: Record<string, any>;
+}
+
 export interface DownloadProgress {
   dataset_id: string;
   status: 'starting' | 'downloading' | 'completed' | 'failed';
