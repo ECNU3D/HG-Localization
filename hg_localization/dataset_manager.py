@@ -22,7 +22,11 @@ from .s3_utils import (
 # --- Path Utilities specific to dataset_manager ---
 
 def _get_dataset_path(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, is_public: bool = False) -> Path:
-    """Constructs the local storage path for a dataset version."""
+    """Constructs the local storage path for a dataset version.
+    
+    Now includes bucket information to prevent path collisions when the same dataset
+    is downloaded from different S3 buckets/endpoints.
+    """
     if config is None:
         config = default_config
         
@@ -32,7 +36,92 @@ def _get_dataset_path(dataset_id: str, config_name: Optional[str] = None, revisi
     
     # Use public store path if this is a public dataset
     base_path = config.public_datasets_store_path if is_public else config.datasets_store_path
-    return base_path / safe_dataset_id / safe_config_name / safe_revision
+    
+    # For bucket-specific storage, include bucket information in the path
+    # This prevents collisions when the same dataset is downloaded from different buckets
+    # Apply to both public and private datasets when bucket is configured
+    if config.s3_bucket_name:
+        # Create a safe bucket identifier
+        safe_bucket_name = _get_safe_path_component(config.s3_bucket_name)
+        # Include endpoint URL hash if present to distinguish between different S3-compatible services
+        bucket_identifier = safe_bucket_name
+        if config.s3_endpoint_url:
+            import hashlib
+            endpoint_hash = hashlib.md5(config.s3_endpoint_url.encode()).hexdigest()[:8]
+            bucket_identifier = f"{safe_bucket_name}_{endpoint_hash}"
+        
+        return base_path / "by_bucket" / bucket_identifier / safe_dataset_id / safe_config_name / safe_revision
+    else:
+        # When no bucket is configured, use the original path structure
+        return base_path / safe_dataset_id / safe_config_name / safe_revision
+
+def _get_dataset_bucket_metadata_path(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, is_public: bool = False) -> Path:
+    """Get the path to the bucket metadata file for a dataset."""
+    dataset_path = _get_dataset_path(dataset_id, config_name, revision, config, is_public)
+    return dataset_path / ".hg_localization_bucket_metadata.json"
+
+def _store_dataset_bucket_metadata(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, is_public: bool = False) -> None:
+    """Store metadata about which S3 bucket/endpoint this dataset came from."""
+    if config is None:
+        config = default_config
+    
+    metadata_path = _get_dataset_bucket_metadata_path(dataset_id, config_name, revision, config, is_public)
+    
+    # Create metadata about the source bucket
+    metadata = {
+        "s3_bucket_name": config.s3_bucket_name,
+        "s3_endpoint_url": config.s3_endpoint_url,
+        "s3_data_prefix": config.s3_data_prefix,
+        "cached_timestamp": json.dumps({"timestamp": str(Path(__file__).stat().st_mtime)}),  # Simple timestamp
+        "is_public": is_public
+    }
+    
+    try:
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2)
+        print(f"Stored bucket metadata for dataset {dataset_id} at {metadata_path}")
+    except Exception as e:
+        print(f"Warning: Failed to store bucket metadata for {dataset_id}: {e}")
+
+def _get_dataset_bucket_metadata(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, is_public: bool = False) -> Optional[Dict[str, Any]]:
+    """Retrieve metadata about which S3 bucket/endpoint this dataset came from."""
+    if config is None:
+        config = default_config
+    
+    metadata_path = _get_dataset_bucket_metadata_path(dataset_id, config_name, revision, config, is_public)
+    
+    if not metadata_path.exists():
+        return None
+    
+    try:
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Warning: Failed to read bucket metadata for {dataset_id}: {e}")
+        return None
+
+def _dataset_matches_current_bucket(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, is_public: bool = False) -> bool:
+    """Check if a cached dataset matches the current S3 bucket configuration."""
+    if config is None:
+        config = default_config
+    
+    metadata = _get_dataset_bucket_metadata(dataset_id, config_name, revision, config, is_public)
+    
+    # If no metadata exists, this is an old dataset - include it for backward compatibility
+    # but only if no S3 bucket is currently configured (local-only mode)
+    if metadata is None:
+        return config.s3_bucket_name is None
+    
+    # If no S3 bucket is currently configured, only show datasets that also have no bucket metadata
+    if config.s3_bucket_name is None:
+        return metadata.get("s3_bucket_name") is None
+    
+    # Compare bucket configuration
+    return (
+        metadata.get("s3_bucket_name") == config.s3_bucket_name and
+        metadata.get("s3_endpoint_url") == config.s3_endpoint_url and
+        metadata.get("s3_data_prefix") == config.s3_data_prefix
+    )
 
 # --- Public Datasets Manifest Fetching (via URL) ---
 
@@ -204,6 +293,8 @@ def download_dataset(dataset_id: str, config_name: Optional[str] = None, revisio
                 if local_save_path.exists() and \
                    ((local_save_path / "dataset_info.json").exists() or \
                     (local_save_path / "dataset_dict.json").exists()):
+                    # Store bucket metadata for the downloaded dataset
+                    _store_dataset_bucket_metadata(dataset_id, config_name, revision, config, is_public=save_to_public)
                     return True, str(local_save_path)
                 else:
                     print(f"Error: S3 download reported success, but dataset not found or incomplete at {local_save_path}. Proceeding to Hugging Face.")
@@ -268,6 +359,8 @@ def download_dataset(dataset_id: str, config_name: Optional[str] = None, revisio
                     os.makedirs(public_dataset_path, exist_ok=True) # Ensure target dir exists for unzip
                     if _unzip_file(tmp_zip_file_path, public_dataset_path):
                         print(f"Successfully downloaded and unzipped public dataset to {public_dataset_path}.")
+                        # Store bucket metadata for the downloaded public dataset
+                        _store_dataset_bucket_metadata(dataset_id, config_name, revision, config, is_public=True)
                         # Update local_save_path to point to the public path and return success
                         local_save_path = public_dataset_path
                         return True, str(local_save_path)
@@ -299,6 +392,9 @@ def download_dataset(dataset_id: str, config_name: Optional[str] = None, revisio
         os.makedirs(local_save_path, exist_ok=True)
         downloaded_hf_dataset.save_to_disk(str(local_save_path))
         print(f"Dataset '{dataset_id}' {version_str} successfully saved to local cache: {local_save_path}")
+        
+        # Store bucket metadata for the downloaded dataset
+        _store_dataset_bucket_metadata(dataset_id, config_name, revision, config, is_public=save_to_public)
 
         card_content_md = get_dataset_card_content(dataset_id, revision=revision)
         if card_content_md:
@@ -563,7 +659,70 @@ def upload_dataset(dataset_obj: Dataset | DatasetDict, dataset_id: str, config_n
             print("Cannot make dataset public as S3 is not configured.")
         return True # True because local save succeeded, S3 was skipped as per config
 
-def list_local_datasets(config: Optional[HGLocalizationConfig] = None, public_access_only: bool = False) -> List[Dict[str, str]]:
+def _scan_dataset_directory(store_path: Path, config: HGLocalizationConfig, is_public_store: bool, filter_by_bucket: bool, include_legacy: bool = True) -> List[Dict[str, str]]:
+    """Scan a dataset directory for both new bucket-specific and legacy storage structures."""
+    datasets = []
+    
+    if not store_path.exists():
+        return datasets
+    
+    # Scan new bucket-specific structure: store_path/by_bucket/bucket_id/dataset_id/config/revision
+    # Apply to both public and private stores when bucket is configured
+    if config.s3_bucket_name:
+        by_bucket_path = store_path / "by_bucket"
+        if by_bucket_path.exists():
+            for bucket_dir in by_bucket_path.iterdir():
+                if bucket_dir.is_dir() and not bucket_dir.name.startswith("."):
+                    datasets.extend(_scan_legacy_structure(bucket_dir, config, is_public_store, filter_by_bucket))
+    
+    # Scan legacy structure: store_path/dataset_id/config/revision (for backward compatibility)
+    if include_legacy:
+        datasets.extend(_scan_legacy_structure(store_path, config, is_public_store, filter_by_bucket))
+    
+    return datasets
+
+def _scan_legacy_structure(base_path: Path, config: HGLocalizationConfig, is_public_store: bool, filter_by_bucket: bool) -> List[Dict[str, str]]:
+    """Scan the legacy dataset storage structure."""
+    datasets = []
+    
+    for dataset_id_dir in base_path.iterdir():
+        if dataset_id_dir.is_dir() and not dataset_id_dir.name.startswith(".") and dataset_id_dir.name != "by_bucket":
+            for config_name_dir in dataset_id_dir.iterdir():
+                if config_name_dir.is_dir():
+                    for revision_dir in config_name_dir.iterdir():
+                        if revision_dir.is_dir() and \
+                           ((revision_dir / "dataset_info.json").exists() or \
+                            (revision_dir / "dataset_dict.json").exists()):
+                            # Convert safe names back to original format
+                            dataset_id_display = _restore_dataset_name(dataset_id_dir.name)
+                            config_name_display = config_name_dir.name
+                            revision_display = revision_dir.name
+                            
+                            has_card = (revision_dir / "dataset_card.md").is_file()
+                            
+                            # Check if this dataset matches the current bucket configuration
+                            if filter_by_bucket and not _dataset_matches_current_bucket(
+                                dataset_id_display, 
+                                config_name_display if config_name_display != config.default_config_name else None,
+                                revision_display if revision_display != config.default_revision_name else None,
+                                config, 
+                                is_public=is_public_store
+                            ):
+                                continue  # Skip this dataset as it doesn't match current bucket
+                            
+                            dataset_info = {
+                                "dataset_id": dataset_id_display,
+                                "config_name": config_name_display if config_name_display != config.default_config_name else None,
+                                "revision": revision_display if revision_display != config.default_revision_name else None,
+                                "path": str(revision_dir),
+                                "has_card": has_card,
+                                "is_public": is_public_store
+                            }
+                            datasets.append(dataset_info)
+    
+    return datasets
+
+def list_local_datasets(config: Optional[HGLocalizationConfig] = None, public_access_only: bool = False, filter_by_bucket: bool = True) -> List[Dict[str, str]]:
     if config is None:
         config = default_config
         
@@ -573,7 +732,7 @@ def list_local_datasets(config: Optional[HGLocalizationConfig] = None, public_ac
     if public_access_only:
         # Public access only - scan public directory only
         if config.public_datasets_store_path.exists():
-            directories_to_scan = [config.public_datasets_store_path]
+            directories_to_scan = [(config.public_datasets_store_path, True)]
             print(f"Public access mode: scanning public datasets only")
         else:
             print(f"Local dataset store directory does not exist: {config.public_datasets_store_path}")
@@ -582,9 +741,9 @@ def list_local_datasets(config: Optional[HGLocalizationConfig] = None, public_ac
         # Private access - scan both public and private directories
         directories_to_scan = []
         if config.public_datasets_store_path.exists():
-            directories_to_scan.append(config.public_datasets_store_path)
+            directories_to_scan.append((config.public_datasets_store_path, True))
         if config.datasets_store_path.exists():
-            directories_to_scan.append(config.datasets_store_path)
+            directories_to_scan.append((config.datasets_store_path, False))
         print(f"Private access mode: scanning both public and private datasets")
         
         if not directories_to_scan:
@@ -593,47 +752,28 @@ def list_local_datasets(config: Optional[HGLocalizationConfig] = None, public_ac
                 print(f"Local dataset store directory does not exist: {config.datasets_store_path}")
             return available_datasets
     
-    for store_path in directories_to_scan:
-        is_public_store = store_path == config.public_datasets_store_path
-        for dataset_id_dir in store_path.iterdir():
-            if dataset_id_dir.is_dir() and not dataset_id_dir.name.startswith("."):
-                for config_name_dir in dataset_id_dir.iterdir():
-                    if config_name_dir.is_dir():
-                        for revision_dir in config_name_dir.iterdir():
-                            if revision_dir.is_dir() and \
-                               ((revision_dir / "dataset_info.json").exists() or \
-                                (revision_dir / "dataset_dict.json").exists()):
-                                # Convert safe names back to original format
-                                dataset_id_display = _restore_dataset_name(dataset_id_dir.name)
-                                config_name_display = config_name_dir.name
-                                revision_display = revision_dir.name
-                                
-                                has_card = (revision_dir / "dataset_card.md").is_file()
-                                dataset_info = {
-                                    "dataset_id": dataset_id_display,
-                                    "config_name": config_name_display if config_name_display != config.default_config_name else None,
-                                    "revision": revision_display if revision_display != config.default_revision_name else None,
-                                    "path": str(revision_dir),
-                                    "has_card": has_card,
-                                    "is_public": is_public_store
-                                }
-                                
-                                # Check for duplicates (same dataset in both public and private)
-                                # Prefer public version if it exists
-                                existing_idx = None
-                                for i, existing in enumerate(available_datasets):
-                                    if (existing["dataset_id"] == dataset_id_display and 
-                                        existing["config_name"] == dataset_info["config_name"] and 
-                                        existing["revision"] == dataset_info["revision"]):
-                                        existing_idx = i
-                                        break
-                                
-                                if existing_idx is not None:
-                                    # Dataset already exists, prefer public version
-                                    if is_public_store:
-                                        available_datasets[existing_idx] = dataset_info
-                                else:
-                                    available_datasets.append(dataset_info)
+    for store_path, is_public_store in directories_to_scan:
+        datasets_from_store = _scan_dataset_directory(store_path, config, is_public_store, filter_by_bucket)
+        
+        # Merge datasets, handling duplicates (prefer public over private)
+        for dataset_info in datasets_from_store:
+            # Check for duplicates (same dataset in both public and private)
+            # Prefer public version if it exists
+            existing_idx = None
+            for i, existing in enumerate(available_datasets):
+                if (existing["dataset_id"] == dataset_info["dataset_id"] and 
+                    existing["config_name"] == dataset_info["config_name"] and 
+                    existing["revision"] == dataset_info["revision"]):
+                    existing_idx = i
+                    break
+            
+            if existing_idx is not None:
+                # Dataset already exists, prefer public version
+                if is_public_store:
+                    available_datasets[existing_idx] = dataset_info
+            else:
+                available_datasets.append(dataset_info)
+    
     if not available_datasets:
         print("No local datasets found in cache.")
     else:
@@ -863,7 +1003,8 @@ def sync_all_local_to_s3(make_public: bool = False, config: Optional[HGLocalizat
         config = default_config
         
     print(f"Starting sync of all local datasets to S3. Make public: {make_public}")
-    local_datasets = list_local_datasets(config)
+    # Use filter_by_bucket=False to sync all local datasets regardless of bucket configuration
+    local_datasets = list_local_datasets(config, filter_by_bucket=False)
     if not local_datasets:
         print("No local datasets found in cache to sync.")
         return
@@ -882,7 +1023,7 @@ def sync_all_local_to_s3(make_public: bool = False, config: Optional[HGLocalizat
         config_name = ds_info.get('config_name') 
         revision = ds_info.get('revision')     
         
-        print(f"\\n--- Processing local dataset for sync: ID='{dataset_id}', Config='{config_name}', Revision='{revision}' ---")
+        print(f"\n--- Processing local dataset for sync: ID='{dataset_id}', Config='{config_name}', Revision='{revision}' ---")
         # sync_local_dataset_to_s3 will use its own S3 client instance
         success, message = sync_local_dataset_to_s3(dataset_id, config_name, revision, make_public=make_public, config=config)
         if success:
@@ -890,7 +1031,95 @@ def sync_all_local_to_s3(make_public: bool = False, config: Optional[HGLocalizat
         else:
             failed_syncs += 1
             
-    print(f"\\n--- Sync all local datasets to S3 finished ---")
+    print("\n--- Sync all local datasets to S3 finished ---")
     print(f"Total local datasets processed: {len(local_datasets)}")
     print(f"Successfully processed (primary sync action): {succeeded_syncs}")
     print(f"Failed to process (see logs for errors): {failed_syncs}") 
+
+def _get_legacy_dataset_path(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, is_public: bool = False) -> Path:
+    """Get the old dataset path structure (before bucket-specific storage)."""
+    if config is None:
+        config = default_config
+        
+    safe_dataset_id = _get_safe_path_component(dataset_id)
+    safe_config_name = _get_safe_path_component(config_name if config_name else config.default_config_name)
+    safe_revision = _get_safe_path_component(revision if revision else config.default_revision_name)
+    
+    base_path = config.public_datasets_store_path if is_public else config.datasets_store_path
+    return base_path / safe_dataset_id / safe_config_name / safe_revision
+
+def migrate_dataset_to_bucket_storage(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, is_public: bool = False) -> bool:
+    """Migrate a dataset from legacy storage to bucket-specific storage.
+    
+    Returns True if migration was successful or not needed, False if failed.
+    """
+    if config is None:
+        config = default_config
+    
+    # Skip migration when no bucket is configured
+    if not config.s3_bucket_name:
+        return True
+    
+    legacy_path = _get_legacy_dataset_path(dataset_id, config_name, revision, config, is_public)
+    new_path = _get_dataset_path(dataset_id, config_name, revision, config, is_public)
+    
+    # If legacy path doesn't exist, no migration needed
+    if not legacy_path.exists():
+        return True
+    
+    # If new path already exists, don't overwrite
+    if new_path.exists():
+        print(f"Warning: New bucket-specific path already exists for {dataset_id}, skipping migration")
+        return True
+    
+    # Check if this is a valid dataset directory
+    if not ((legacy_path / "dataset_info.json").exists() or (legacy_path / "dataset_dict.json").exists()):
+        print(f"Warning: {legacy_path} doesn't appear to be a valid dataset directory, skipping migration")
+        return True
+    
+    try:
+        # Create parent directories for new path
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Move the dataset directory
+        shutil.move(str(legacy_path), str(new_path))
+        
+        # Store bucket metadata for the migrated dataset
+        _store_dataset_bucket_metadata(dataset_id, config_name, revision, config, is_public)
+        
+        print(f"Successfully migrated dataset {dataset_id} from {legacy_path} to {new_path}")
+        return True
+        
+    except Exception as e:
+        print(f"Error migrating dataset {dataset_id}: {e}")
+        return False
+
+def migrate_all_datasets_to_bucket_storage(config: Optional[HGLocalizationConfig] = None) -> None:
+    """Migrate all existing datasets to bucket-specific storage structure."""
+    if config is None:
+        config = default_config
+    
+    if not config.s3_bucket_name:
+        print("No S3 bucket configured, skipping migration")
+        return
+    
+    print("Starting migration of existing datasets to bucket-specific storage...")
+    
+    # Get all datasets using the old listing method (without bucket filtering)
+    old_datasets = list_local_datasets(config=config, filter_by_bucket=False)
+    
+    migrated_count = 0
+    failed_count = 0
+    
+    for dataset_info in old_datasets:
+        dataset_id = dataset_info["dataset_id"]
+        config_name = dataset_info.get("config_name")
+        revision = dataset_info.get("revision")
+        is_public = dataset_info.get("is_public", False)
+        
+        if migrate_dataset_to_bucket_storage(dataset_id, config_name, revision, config, is_public):
+            migrated_count += 1
+        else:
+            failed_count += 1
+    
+    print(f"Migration completed: {migrated_count} datasets migrated, {failed_count} failed") 

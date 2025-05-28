@@ -133,14 +133,40 @@ def mock_aws_creds_for_dm(monkeypatch):
 # --- Tests for _get_dataset_path (specific to dataset_manager) ---
 def test_dm_get_dataset_path(temp_datasets_store, mock_utils_for_dm):
     base_path = temp_datasets_store
-    
-    # Test private path (default)
+
+    # Test private path (default) - now uses bucket-specific structure when bucket is configured
     path1 = _get_dataset_path("test/ds1", config=default_config)
-    assert path1 == base_path / "test_ds1" / default_config.default_config_name / default_config.default_revision_name
-    
-    # Test public path
+    if default_config.s3_bucket_name:
+        # With bucket configured, should use bucket-specific structure
+        # Use the mock's side effect to get the safe bucket name
+        safe_bucket_name = default_config.s3_bucket_name.replace("/", "_").replace("\\", "_")
+        bucket_identifier = safe_bucket_name
+        if default_config.s3_endpoint_url:
+            import hashlib
+            endpoint_hash = hashlib.md5(default_config.s3_endpoint_url.encode()).hexdigest()[:8]
+            bucket_identifier = f"{safe_bucket_name}_{endpoint_hash}"
+        expected_path1 = base_path / "by_bucket" / bucket_identifier / "test_ds1" / default_config.default_config_name / default_config.default_revision_name
+    else:
+        # Without bucket, should use legacy structure
+        expected_path1 = base_path / "test_ds1" / default_config.default_config_name / default_config.default_revision_name
+    assert path1 == expected_path1
+
+    # Test public path - also uses bucket-specific structure when bucket is configured
     path2 = _get_dataset_path("test/ds1", config=default_config, is_public=True)
-    assert path2 == base_path / "public" / "test_ds1" / default_config.default_config_name / default_config.default_revision_name
+    if default_config.s3_bucket_name:
+        # With bucket configured, should use bucket-specific structure in public store
+        # Use the mock's side effect to get the safe bucket name
+        safe_bucket_name = default_config.s3_bucket_name.replace("/", "_").replace("\\", "_")
+        bucket_identifier = safe_bucket_name
+        if default_config.s3_endpoint_url:
+            import hashlib
+            endpoint_hash = hashlib.md5(default_config.s3_endpoint_url.encode()).hexdigest()[:8]
+            bucket_identifier = f"{safe_bucket_name}_{endpoint_hash}"
+        expected_path2 = base_path / "public" / "by_bucket" / bucket_identifier / "test_ds1" / default_config.default_config_name / default_config.default_revision_name
+    else:
+        # Without bucket, should use legacy structure in public store
+        expected_path2 = base_path / "public" / "test_ds1" / default_config.default_config_name / default_config.default_revision_name
+    assert path2 == expected_path2
     
     mock_utils_for_dm["_get_safe_path_component"].assert_any_call("test/ds1")
 
@@ -529,12 +555,22 @@ def test_download_dataset_new_full_spec(
         mock_get_card.return_value = "Mocked card data"
 
         success, msg_path_str = download_dataset(
-            dataset_id, config_name=config_name, revision=revision, 
+            dataset_id, config_name=config_name, revision=revision,
             trust_remote_code=True, make_public=False, skip_s3_upload=True # Skip S3 for this basic test
         , config=default_config)
 
         assert success is True
-        expected_path = temp_datasets_store / "new_dataset" / "config1" / "v1.0"
+        # With bucket configured, should use bucket-specific structure
+        if default_config.s3_bucket_name:
+            safe_bucket_name = default_config.s3_bucket_name.replace("/", "_").replace("\\", "_")
+            bucket_identifier = safe_bucket_name
+            if default_config.s3_endpoint_url:
+                import hashlib
+                endpoint_hash = hashlib.md5(default_config.s3_endpoint_url.encode()).hexdigest()[:8]
+                bucket_identifier = f"{safe_bucket_name}_{endpoint_hash}"
+            expected_path = temp_datasets_store / "by_bucket" / bucket_identifier / "new_dataset" / "config1" / "v1.0"
+        else:
+            expected_path = temp_datasets_store / "new_dataset" / "config1" / "v1.0"
         assert Path(msg_path_str) == expected_path
         mock_hf_datasets_apis["load_dataset"].assert_called_once_with(
             path=dataset_id, name=config_name, revision=revision, trust_remote_code=True
@@ -1102,7 +1138,7 @@ def test_list_local_datasets_with_non_dataset_files_and_dirs(temp_datasets_store
     os.makedirs(ds_path, exist_ok=True)
     (ds_path / "dataset_info.json").touch() # Marker file
 
-    datasets = list_local_datasets(config=default_config)
+    datasets = list_local_datasets(config=default_config, filter_by_bucket=False)
     assert len(datasets) == 1
     assert datasets[0]["dataset_id"] == "my_dataset/id"
     
@@ -1151,7 +1187,7 @@ def test_list_local_datasets_various_structures(temp_datasets_store, mock_utils_
     (temp_datasets_store / "partial_dataset" / "config_only").mkdir(parents=True)
 
 
-    datasets = list_local_datasets(config=default_config)
+    datasets = list_local_datasets(config=default_config, filter_by_bucket=False)
     assert len(datasets) == 3
     
     # Sort by dataset_id for consistent checking
@@ -1208,7 +1244,7 @@ def test_list_local_datasets_invalid_subdirs(temp_datasets_store, mock_utils_for
     (config_dir_for_rev_file / "revision_as_file.json").touch()
 
 
-    datasets = list_local_datasets(config=default_config)
+    datasets = list_local_datasets(config=default_config, filter_by_bucket=False)
     assert len(datasets) == 1
     assert datasets[0]["dataset_id"] == "valid/ds"
     
@@ -2057,9 +2093,9 @@ def test_sync_all_local_to_s3_verbose_output_format(
     sync_all_local_to_s3(make_public=False, config=default_config)
     
     captured = capsys.readouterr()
-    # Check for the specific formatting with escaped newlines
-    assert "\\n--- Processing local dataset for sync: ID='test/dataset', Config='test_config', Revision='test_revision' ---" in captured.out
-    assert "\\n--- Sync all local datasets to S3 finished ---" in captured.out
+    # Check for the specific formatting
+    assert "--- Processing local dataset for sync: ID='test/dataset', Config='test_config', Revision='test_revision' ---" in captured.out
+    assert "--- Sync all local datasets to S3 finished ---" in captured.out
 
 # --- Additional tests for public/private cache regression prevention ---
 

@@ -33,6 +33,14 @@ from hg_localization import (
     upload_dataset
 )
 
+# Import migration functions
+from hg_localization.dataset_manager import (
+    migrate_all_datasets_to_bucket_storage,
+    migrate_dataset_to_bucket_storage,
+    _get_legacy_dataset_path,
+    _get_dataset_path
+)
+
 # Cookie configuration
 COOKIE_NAME = "hg_localization_config"
 COOKIE_MAX_AGE = 30 * 24 * 60 * 60  # 30 days in seconds
@@ -236,11 +244,12 @@ async def get_config_status(request: Request):
 # Dataset endpoints
 @app.get("/api/datasets/cached", response_model=List[DatasetInfo])
 async def get_cached_datasets(request: Request):
-    """Get list of cached datasets"""
+    """Get list of cached datasets that match the current S3 bucket configuration"""
     try:
         config = get_config_from_request(request)
         public_only = is_public_access_only(config)
-        datasets = list_local_datasets(config=config, public_access_only=public_only)
+        # Filter datasets by bucket configuration to only show datasets from the current bucket
+        datasets = list_local_datasets(config=config, public_access_only=public_only, filter_by_bucket=True)
         return [
             DatasetInfo(
                 dataset_id=ds["dataset_id"],
@@ -256,6 +265,30 @@ async def get_cached_datasets(request: Request):
         ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing cached datasets: {str(e)}")
+
+@app.get("/api/datasets/cached/all", response_model=List[DatasetInfo])
+async def get_all_cached_datasets(request: Request):
+    """Get list of all cached datasets regardless of bucket configuration (for debugging/migration)"""
+    try:
+        config = get_config_from_request(request)
+        public_only = is_public_access_only(config)
+        # Don't filter by bucket - show all cached datasets
+        datasets = list_local_datasets(config=config, public_access_only=public_only, filter_by_bucket=False)
+        return [
+            DatasetInfo(
+                dataset_id=ds["dataset_id"],
+                config_name=ds.get("config_name"),
+                revision=ds.get("revision"),
+                path=ds.get("path"),
+                has_card=ds.get("has_card", False),
+                source="cached",
+                is_cached=True,
+                available_s3=False
+            )
+            for ds in datasets
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing all cached datasets: {str(e)}")
 
 @app.get("/api/datasets/s3", response_model=List[DatasetInfo])
 async def get_s3_datasets(request: Request):
@@ -284,13 +317,14 @@ async def get_s3_datasets(request: Request):
 
 @app.get("/api/datasets/all", response_model=List[DatasetInfo])
 async def get_all_datasets(request: Request):
-    """Get combined list of cached and S3 datasets"""
+    """Get combined list of cached and S3 datasets that match the current bucket configuration"""
     config = get_config_from_request(request)
     
-    # Get cached datasets
+    # Get cached datasets that match the current bucket configuration
     try:
         public_only = is_public_access_only(config)
-        cached_datasets_raw = list_local_datasets(config=config, public_access_only=public_only)
+        # Filter datasets by bucket configuration to only show datasets from the current bucket
+        cached_datasets_raw = list_local_datasets(config=config, public_access_only=public_only, filter_by_bucket=True)
         cached_datasets = [
             DatasetInfo(
                 dataset_id=ds["dataset_id"],
@@ -743,6 +777,140 @@ async def health_check():
 # Serve static files (for production)
 if Path("static").exists():
     app.mount("/", StaticFiles(directory="static", html=True), name="static")
+
+class MigrationStatus(BaseModel):
+    needs_migration: bool
+    legacy_datasets_count: int
+    current_bucket: Optional[str]
+    migration_available: bool
+
+class MigrationResult(BaseModel):
+    success: bool
+    migrated_count: int
+    failed_count: int
+    message: str
+
+@app.get("/api/datasets/migration/status", response_model=MigrationStatus)
+async def get_migration_status(request: Request):
+    """Check if there are legacy datasets that need migration to bucket-specific storage"""
+    try:
+        config = get_config_from_request(request)
+        
+        # Check if migration is available (requires S3 bucket configuration)
+        migration_available = config is not None and config.s3_bucket_name is not None
+        
+        if not migration_available:
+            return MigrationStatus(
+                needs_migration=False,
+                legacy_datasets_count=0,
+                current_bucket=None,
+                migration_available=False
+            )
+        
+        # Get all datasets without bucket filtering to find legacy ones
+        all_datasets = list_local_datasets(config=config, filter_by_bucket=False)
+        
+        # Count datasets that are in legacy storage locations
+        legacy_count = 0
+        for ds in all_datasets:
+            dataset_id = ds["dataset_id"]
+            config_name = ds.get("config_name")
+            revision = ds.get("revision")
+            is_public = ds.get("is_public", False)
+            
+            # Check if this dataset is in a legacy path
+            legacy_path = _get_legacy_dataset_path(dataset_id, config_name, revision, config, is_public)
+            current_path = _get_dataset_path(dataset_id, config_name, revision, config, is_public)
+            
+            # If the dataset path equals the legacy path, it needs migration
+            if str(legacy_path) == ds["path"] and str(legacy_path) != str(current_path):
+                legacy_count += 1
+        
+        return MigrationStatus(
+            needs_migration=legacy_count > 0,
+            legacy_datasets_count=legacy_count,
+            current_bucket=config.s3_bucket_name,
+            migration_available=migration_available
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error checking migration status: {str(e)}")
+
+@app.post("/api/datasets/migration/migrate-all", response_model=MigrationResult)
+async def migrate_all_datasets(request: Request):
+    """Migrate all legacy datasets to bucket-specific storage"""
+    try:
+        config = get_config_from_request(request)
+        
+        if not config or not config.s3_bucket_name:
+            raise HTTPException(status_code=400, detail="S3 bucket configuration required for migration")
+        
+        # Get datasets before migration
+        datasets_before = list_local_datasets(config=config, filter_by_bucket=False)
+        legacy_datasets = []
+        
+        for ds in datasets_before:
+            dataset_id = ds["dataset_id"]
+            config_name = ds.get("config_name")
+            revision = ds.get("revision")
+            is_public = ds.get("is_public", False)
+            
+            # Check if this dataset is in a legacy path
+            legacy_path = _get_legacy_dataset_path(dataset_id, config_name, revision, config, is_public)
+            current_path = _get_dataset_path(dataset_id, config_name, revision, config, is_public)
+            
+            if str(legacy_path) == ds["path"] and str(legacy_path) != str(current_path):
+                legacy_datasets.append((dataset_id, config_name, revision, is_public))
+        
+        # Perform migration
+        migrated_count = 0
+        failed_count = 0
+        
+        for dataset_id, config_name, revision, is_public in legacy_datasets:
+            if migrate_dataset_to_bucket_storage(dataset_id, config_name, revision, config, is_public):
+                migrated_count += 1
+            else:
+                failed_count += 1
+        
+        return MigrationResult(
+            success=failed_count == 0,
+            migrated_count=migrated_count,
+            failed_count=failed_count,
+            message=f"Migration completed: {migrated_count} datasets migrated, {failed_count} failed"
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during migration: {str(e)}")
+
+@app.post("/api/datasets/{dataset_id:path}/migrate")
+async def migrate_single_dataset(
+    dataset_id: str,
+    config_name: Optional[str] = None,
+    revision: Optional[str] = None,
+    request: Request = None
+):
+    """Migrate a single dataset to bucket-specific storage"""
+    try:
+        config = get_config_from_request(request)
+        
+        if not config or not config.s3_bucket_name:
+            raise HTTPException(status_code=400, detail="S3 bucket configuration required for migration")
+        
+        # Determine if this is a public dataset by checking both paths
+        is_public = False
+        public_legacy_path = _get_legacy_dataset_path(dataset_id, config_name, revision, config, is_public=True)
+        if public_legacy_path.exists():
+            is_public = True
+        
+        success = migrate_dataset_to_bucket_storage(dataset_id, config_name, revision, config, is_public)
+        
+        if success:
+            return {"message": f"Successfully migrated dataset {dataset_id}"}
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to migrate dataset {dataset_id}")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error migrating dataset: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(

@@ -12,7 +12,7 @@ from pathlib import Path
 
 def start_backend():
     """Start the FastAPI backend server"""
-    print("🚀 Starting HG-Localization UI Backend...")
+    print(">> Starting HG-Localization UI Backend...")
     
     # Add the parent directory to sys.path to import hg_localization
     sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -30,8 +30,8 @@ def start_backend():
         import uvicorn
         from main import app
         
-        print("✅ Backend will be available at: http://localhost:8000")
-        print("📚 API documentation at: http://localhost:8000/docs")
+        print("OK Backend will be available at: http://localhost:8000")
+        print(">> API documentation at: http://localhost:8000/docs")
         
         uvicorn.run(
             "main:app",
@@ -41,50 +41,50 @@ def start_backend():
             log_level="info"
         )
     except ImportError as e:
-        print(f"❌ Error importing backend dependencies: {e}")
-        print("💡 Make sure you've installed the backend requirements:")
+        print(f"ERROR: Error importing backend dependencies: {e}")
+        print("TIP: Make sure you've installed the backend requirements:")
         print("   cd backend && pip install -r requirements.txt")
         os.chdir(original_cwd)
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Error starting backend: {e}")
+        print(f"ERROR: Error starting backend: {e}")
         os.chdir(original_cwd)
         sys.exit(1)
 
 def start_frontend():
     """Start the React frontend development server"""
-    print("🚀 Starting HG-Localization UI Frontend...")
+    print(">> Starting HG-Localization UI Frontend...")
     
     frontend_dir = Path(__file__).parent / "frontend"
     
     if not frontend_dir.exists():
-        print(f"❌ Error: Frontend directory not found at {frontend_dir}")
+        print(f"ERROR: Frontend directory not found at {frontend_dir}")
         sys.exit(1)
     
     # Check if node_modules exists
     node_modules = frontend_dir / "node_modules"
     if not node_modules.exists():
-        print("📦 Installing frontend dependencies...")
+        print(">> Installing frontend dependencies...")
         try:
             subprocess.run(["npm", "install"], cwd=frontend_dir, check=True, shell=True)
         except subprocess.CalledProcessError as e:
-            print(f"❌ Error installing dependencies: {e}")
+            print(f"ERROR: Error installing dependencies: {e}")
             sys.exit(1)
     
-    print("✅ Frontend will be available at: http://localhost:3000")
+    print("OK Frontend will be available at: http://localhost:3000")
     
     # Start the development server
     try:
         subprocess.run(["npm", "start"], cwd=frontend_dir, check=True, shell=True)
     except subprocess.CalledProcessError as e:
-        print(f"❌ Error starting frontend: {e}")
+        print(f"ERROR: Error starting frontend: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\n🛑 Frontend server stopped.")
+        print("\nSTOP: Frontend server stopped.")
 
 def start_both():
     """Start both backend and frontend in separate processes"""
-    print("🚀 Starting HG-Localization UI (Backend + Frontend)...")
+    print(">> Starting HG-Localization UI (Backend + Frontend)...")
     
     # Start backend in a separate process
     backend_process = subprocess.Popen(
@@ -93,7 +93,7 @@ def start_both():
     )
     
     # Give backend time to start
-    print("⏳ Waiting for backend to start...")
+    print(">> Waiting for backend to start...")
     time.sleep(5)
     
     # Check if backend is running
@@ -101,17 +101,17 @@ def start_both():
         import requests
         response = requests.get("http://localhost:8000/api/health", timeout=5)
         if response.status_code == 200:
-            print("✅ Backend started successfully")
+            print("OK Backend started successfully")
         else:
-            print("⚠️  Backend may not be ready yet")
+            print("WARN: Backend may not be ready yet")
     except:
-        print("⚠️  Backend may not be ready yet")
+        print("WARN: Backend may not be ready yet")
     
     # Start frontend in main thread
     try:
         start_frontend()
     except KeyboardInterrupt:
-        print("\n🛑 Shutting down services...")
+        print("\nSTOP: Shutting down services...")
         backend_process.terminate()
         backend_process.wait(timeout=5)
 
@@ -142,11 +142,11 @@ Examples:
     args = parser.parse_args()
     
     print("=" * 60)
-    print("🎯 HG-Localization UI Startup Script")
+    print(">> HG-Localization UI Startup Script")
     print("=" * 60)
     
     if args.backend and args.frontend:
-        print("❌ Error: Cannot specify both --backend and --frontend")
+        print("ERROR: Cannot specify both --backend and --frontend")
         sys.exit(1)
     elif args.backend:
         start_backend()

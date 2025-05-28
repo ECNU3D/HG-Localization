@@ -18,10 +18,10 @@ def stream_output(process, prefix, color_code):
 
 def start_services():
     """Start both backend and frontend services with visible logs"""
-    print("🚀 Starting HG-Localization UI Services with Logs...")
+    print(">> Starting HG-Localization UI Services with Logs...")
     
     # Start backend
-    print("📡 Starting backend...")
+    print(">> Starting backend...")
     backend_process = subprocess.Popen(
         [sys.executable, "hg_localization_ui/start_ui.py", "--backend"],
         stdout=subprocess.PIPE,
@@ -31,7 +31,7 @@ def start_services():
     )
     
     # Start frontend
-    print("🌐 Starting frontend...")
+    print(">> Starting frontend...")
     frontend_process = subprocess.Popen(
         [sys.executable, "hg_localization_ui/start_ui.py", "--frontend"],
         stdout=subprocess.PIPE,
@@ -55,15 +55,15 @@ def start_services():
     backend_thread.start()
     frontend_thread.start()
     
-    print("✅ Services starting...")
-    print("📡 Backend: http://localhost:8000")
-    print("🌐 Frontend: http://localhost:3000")
-    print("📚 API Docs: http://localhost:8000/docs")
+    print("OK Services starting...")
+    print(">> Backend: http://localhost:8000")
+    print(">> Frontend: http://localhost:3000")
+    print(">> API Docs: http://localhost:8000/docs")
     print("\nLogs will appear below with [BACKEND] and [FRONTEND] prefixes")
     print("Press Ctrl+C to stop all services\n")
     
     def signal_handler(sig, frame):
-        print("\n🛑 Stopping services...")
+        print("\nSTOP: Stopping services...")
         backend_process.terminate()
         frontend_process.terminate()
         
@@ -75,7 +75,7 @@ def start_services():
             backend_process.kill()
             frontend_process.kill()
         
-        print("✅ All services stopped")
+        print("OK All services stopped")
         sys.exit(0)
     
     # Register signal handler
@@ -85,10 +85,10 @@ def start_services():
         # Wait for processes
         while True:
             if backend_process.poll() is not None:
-                print("❌ Backend process stopped unexpectedly")
+                print("ERROR: Backend process stopped unexpectedly")
                 break
             if frontend_process.poll() is not None:
-                print("❌ Frontend process stopped unexpectedly")
+                print("ERROR: Frontend process stopped unexpectedly")
                 break
             time.sleep(1)
     except KeyboardInterrupt:
