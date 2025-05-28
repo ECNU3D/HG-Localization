@@ -1,82 +1,62 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { 
-  Brain, 
-  Download, 
-  Search, 
-  Plus, 
-  FileText, 
-  Settings, 
-  CheckCircle, 
-  AlertCircle,
-  Loader2,
-  RefreshCw
-} from 'lucide-react';
-import { useCachedModels, useCacheModel, getModelTypeDisplay } from '../hooks/useModels';
-import { ModelInfo, ModelDownloadRequest } from '../types';
-import { WebSocketClient } from '../api/client';
+import { Search, Brain, Cloud, HardDrive, Filter, RefreshCw, Server, FileText, Settings, CheckCircle } from 'lucide-react';
+import { useModels, useCacheModel } from '../hooks/useModels';
+import { useConfigStatus } from '../hooks/useConfig';
+import { ModelInfo } from '../types';
 
 export const ModelsPage: React.FC = () => {
+  const { data: models, isLoading, refetch } = useModels();
+  const { data: configStatus } = useConfigStatus();
+  const cacheMutation = useCacheModel();
+
   const [searchTerm, setSearchTerm] = useState('');
-  const [showCacheDialog, setShowCacheDialog] = useState(false);
-  const [cacheForm, setCacheForm] = useState<ModelDownloadRequest>({
-    model_id: '',
-    revision: '',
-    make_public: false,
-    metadata_only: true,
-  });
-  const [wsMessages, setWsMessages] = useState<string[]>([]);
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'cached' | 's3'>('all');
+  const [cachingModels, setCachingModels] = useState<Set<string>>(new Set());
 
-  const { data: cachedModels = [], isLoading, error, refetch } = useCachedModels();
-  const cacheModelMutation = useCacheModel();
+  const filteredModels = useMemo(() => {
+    if (!models) return [];
 
-  // WebSocket setup for real-time updates
-  useEffect(() => {
-    const client = new WebSocketClient(
-      `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8000/ws`,
-      (message) => {
-        // Only show model-related messages, filter out dev server messages
-        if (message.includes('model') || message.includes('Model') || message.includes('caching') || message.includes('cached')) {
-          setWsMessages(prev => [...prev.slice(-4), message]); // Keep last 5 messages
-        }
-        // Auto-refresh models list when caching completes
-        if (message.includes('Successfully cached') || message.includes('Failed to cache')) {
-          setTimeout(() => refetch(), 1000);
-        }
-      },
-      (error) => console.error('WebSocket error:', error),
-      () => console.log('WebSocket disconnected')
-    );
+    return models.filter(model => {
+      const matchesSearch = model.model_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                           (model.revision?.toLowerCase().includes(searchTerm.toLowerCase()));
+      
+      let matchesSource = true;
+      if (sourceFilter === 'cached') {
+        matchesSource = model.is_cached;
+      } else if (sourceFilter === 's3') {
+        matchesSource = model.available_s3;
+      }
+
+      return matchesSearch && matchesSource;
+    });
+  }, [models, searchTerm, sourceFilter]);
+
+  const handleCache = async (model: ModelInfo) => {
+    const modelKey = `${model.model_id}_${model.revision}`;
     
-    client.connect();
-
-    return () => {
-      client.disconnect();
-    };
-  }, [refetch]);
-
-  // Filter models based on search term
-  const filteredModels = cachedModels.filter(model =>
-    model.model_id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (model.revision && model.revision.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
-
-  const handleCacheModel = async () => {
-    if (!cacheForm.model_id.trim()) return;
-
+    setCachingModels(prev => new Set(prev).add(modelKey));
+    
     try {
-      await cacheModelMutation.mutateAsync(cacheForm);
-      setShowCacheDialog(false);
-      setCacheForm({
-        model_id: '',
-        revision: '',
+      await cacheMutation.mutateAsync({
+        model_id: model.model_id,
+        revision: model.revision,
         make_public: false,
-        metadata_only: true,
+        metadata_only: true, // Default to metadata only
       });
     } catch (error) {
-      console.error('Failed to cache model:', error);
+      console.error('Cache failed:', error);
+    } finally {
+      setCachingModels(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(modelKey);
+        return newSet;
+      });
     }
   };
+
+  const getModelKey = (model: ModelInfo) => 
+    `${model.model_id}_${model.revision}`;
 
   const getModelIcon = (model: ModelInfo) => {
     if (model.is_full_model) {
@@ -85,243 +65,237 @@ export const ModelsPage: React.FC = () => {
     return <FileText className="w-5 h-5 text-blue-600" />;
   };
 
-  const getModelBadgeColor = (model: ModelInfo) => {
-    return model.is_full_model ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800';
-  };
-
-  if (error) {
+  if (isLoading) {
     return (
-      <div className="text-center py-12">
-        <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
-        <h3 className="text-lg font-medium text-gray-900 mb-2">Error Loading Models</h3>
-        <p className="text-gray-600 mb-4">Failed to load cached models. Please try again.</p>
-        <button
-          onClick={() => refetch()}
-          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700"
-        >
-          <RefreshCw className="w-4 h-4 mr-2" />
-          Retry
-        </button>
+      <div className="flex items-center justify-center min-h-96">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading models...</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Models</h1>
-          <p className="text-gray-600">Manage your cached model metadata and full models</p>
+          <h1 className="text-3xl font-bold text-gray-900">Models</h1>
+          <p className="mt-2 text-gray-600">
+            Browse and manage your Hugging Face models
+          </p>
         </div>
-        <button
-          onClick={() => setShowCacheDialog(true)}
-          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
-        >
-          <Plus className="w-4 h-4 mr-2" />
-          Cache Model
-        </button>
+        
+        <div className="mt-4 sm:mt-0 flex items-center space-x-3">
+          <div className="flex items-center space-x-2 text-sm text-gray-600">
+            <div className="w-2 h-2 rounded-full bg-green-500"></div>
+            <span>
+              {configStatus?.has_credentials ? 'Private Access' : 'Public Access'}
+            </span>
+          </div>
+          
+          <button
+            onClick={() => refetch()}
+            className="btn-outline flex items-center space-x-2"
+          >
+            <RefreshCw className="w-4 h-4" />
+            <span>Refresh</span>
+          </button>
+        </div>
       </div>
 
-      {/* Real-time messages */}
-      {wsMessages.length > 0 && (
-        <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
-          <h4 className="text-sm font-medium text-blue-800 mb-2">Model Caching Updates</h4>
-          <div className="space-y-1">
-            {wsMessages.map((message, index) => (
-              <p key={index} className="text-sm text-blue-700">{message}</p>
-            ))}
+      <div className="card">
+        <div className="flex flex-col sm:flex-row sm:items-center space-y-4 sm:space-y-0 sm:space-x-4">
+          <div className="flex-1 relative">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+            <input
+              type="text"
+              placeholder="Search models..."
+              className="input pl-10"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <Filter className="w-4 h-4 text-gray-500" />
+            <select
+              value={sourceFilter}
+              onChange={(e) => setSourceFilter(e.target.value as 'all' | 'cached' | 's3')}
+              className="input w-auto"
+            >
+              <option value="all">All Sources</option>
+              <option value="cached">Cached Only</option>
+              <option value="s3">S3 Only</option>
+            </select>
           </div>
         </div>
-      )}
-
-      {/* Search */}
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-        <input
-          type="text"
-          placeholder="Search models..."
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
-        />
       </div>
 
-      {/* Models List */}
-      {isLoading ? (
-        <div className="text-center py-12">
-          <Loader2 className="w-8 h-8 text-primary-600 animate-spin mx-auto mb-4" />
-          <p className="text-gray-600">Loading models...</p>
-        </div>
-      ) : filteredModels.length === 0 ? (
-        <div className="text-center py-12">
-          <Brain className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 mb-2">
-            {searchTerm ? 'No models found' : 'No models cached yet'}
-          </h3>
-          <p className="text-gray-600 mb-4">
-            {searchTerm 
-              ? 'Try adjusting your search terms.' 
-              : 'Start by caching a model from Hugging Face Hub.'
-            }
-          </p>
-          {!searchTerm && (
-            <button
-              onClick={() => setShowCacheDialog(true)}
-              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700"
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              Cache Your First Model
-            </button>
-          )}
-        </div>
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {filteredModels.map((model) => (
-            <Link
-              key={`${model.model_id}-${model.revision || 'default'}`}
-              to={`/models/${encodeURIComponent(model.model_id)}${model.revision ? `?revision=${encodeURIComponent(model.revision)}` : ''}`}
-              className="block bg-white rounded-lg border border-gray-200 p-6 hover:shadow-md transition-shadow"
-            >
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center space-x-2 flex-1 min-w-0">
-                  {getModelIcon(model)}
-                  <h3 className="text-lg font-medium text-gray-900 break-words">
-                    {model.model_id}
-                  </h3>
-                </div>
-                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium flex-shrink-0 ml-2 ${getModelBadgeColor(model)}`}>
-                  {getModelTypeDisplay(model)}
-                </span>
-              </div>
-
-              {model.revision && model.revision !== 'default' && (
-                <p className="text-sm text-gray-600 mb-2">
-                  Revision: {model.revision}
-                </p>
-              )}
-
-              <div className="flex items-center space-x-4 text-sm text-gray-500">
-                <div className="flex items-center space-x-1">
-                  <FileText className="w-4 h-4" />
-                  <span>Card: {model.has_card ? 'Yes' : 'No'}</span>
-                </div>
-                <div className="flex items-center space-x-1">
-                  <Settings className="w-4 h-4" />
-                  <span>Config: {model.has_config ? 'Yes' : 'No'}</span>
-                </div>
-              </div>
-
-              {model.is_full_model && (
-                <div className="mt-2 flex items-center space-x-1 text-sm text-green-600">
-                  <CheckCircle className="w-4 h-4" />
-                  <span>Full model with weights</span>
-                </div>
-              )}
-            </Link>
-          ))}
-        </div>
-      )}
-
-      {/* Cache Model Dialog */}
-      {showCacheDialog && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
-            <div className="mt-3">
-              <h3 className="text-lg font-medium text-gray-900 mb-4">Cache Model</h3>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Model ID *
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g., bert-base-uncased, microsoft/DialoGPT-medium"
-                    value={cacheForm.model_id}
-                    onChange={(e) => setCacheForm(prev => ({ ...prev, model_id: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Revision (optional)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="main, v1.0, commit hash..."
-                    value={cacheForm.revision}
-                    onChange={(e) => setCacheForm(prev => ({ ...prev, revision: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-primary-500 focus:border-primary-500"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="flex items-center">
-                    <input
-                      type="radio"
-                      name="downloadType"
-                      checked={cacheForm.metadata_only}
-                      onChange={() => setCacheForm(prev => ({ ...prev, metadata_only: true }))}
-                      className="mr-2"
-                    />
-                    <span className="text-sm text-gray-700">Metadata only (fast, recommended)</span>
-                  </label>
-                  <label className="flex items-center">
-                    <input
-                      type="radio"
-                      name="downloadType"
-                      checked={!cacheForm.metadata_only}
-                      onChange={() => setCacheForm(prev => ({ ...prev, metadata_only: false }))}
-                      className="mr-2"
-                    />
-                    <span className="text-sm text-gray-700">Full model (includes weights, large download)</span>
-                  </label>
-                </div>
-
-                <div>
-                  <label className="flex items-center">
-                    <input
-                      type="checkbox"
-                      checked={cacheForm.make_public}
-                      onChange={(e) => setCacheForm(prev => ({ ...prev, make_public: e.target.checked }))}
-                      className="mr-2"
-                    />
-                    <span className="text-sm text-gray-700">Make public (requires S3)</span>
-                  </label>
-                </div>
-              </div>
-
-              <div className="flex justify-end space-x-3 mt-6">
-                <button
-                  onClick={() => setShowCacheDialog(false)}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleCacheModel}
-                  disabled={!cacheForm.model_id.trim() || cacheModelMutation.isPending}
-                  className="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-                >
-                  {cacheModelMutation.isPending ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Caching...
-                    </>
-                  ) : (
-                    <>
-                      <Download className="w-4 h-4 mr-2" />
-                      Cache Model
-                    </>
-                  )}
-                </button>
-              </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="card">
+          <div className="flex items-center">
+            <Brain className="w-8 h-8 text-primary-600" />
+            <div className="ml-3">
+              <p className="text-sm font-medium text-gray-500">Total Models</p>
+              <p className="text-2xl font-semibold text-gray-900">
+                {filteredModels.length}
+              </p>
             </div>
           </div>
         </div>
-      )}
+
+        <div className="card">
+          <div className="flex items-center">
+            <HardDrive className="w-8 h-8 text-green-600" />
+            <div className="ml-3">
+              <p className="text-sm font-medium text-gray-500">Cached Models</p>
+              <p className="text-2xl font-semibold text-gray-900">
+                {filteredModels.filter(m => m.is_cached).length}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="flex items-center">
+            <Cloud className="w-8 h-8 text-blue-600" />
+            <div className="ml-3">
+              <p className="text-sm font-medium text-gray-500">S3 Models</p>
+              <p className="text-2xl font-semibold text-gray-900">
+                {filteredModels.filter(m => m.available_s3).length}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {filteredModels.length === 0 ? (
+          <div className="card text-center py-12">
+            <Brain className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-gray-900 mb-2">No models found</h3>
+            <p className="text-gray-600 mb-4">
+              {searchTerm || sourceFilter !== 'all' 
+                ? 'Try adjusting your search or filters.'
+                : 'No models are available. Configure your S3 settings or upload some models.'}
+            </p>
+            {!searchTerm && sourceFilter === 'all' && (
+              <Link to="/config" className="btn-primary">
+                Configure S3 Settings
+              </Link>
+            )}
+          </div>
+        ) : (
+          filteredModels.map((model) => {
+            const modelKey = getModelKey(model);
+            const isCaching = cachingModels.has(modelKey);
+            
+            return (
+              <div key={modelKey} className="card hover:shadow-md transition-shadow">
+                <div className="flex items-center justify-between">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center space-x-3">
+                      <Link
+                        to={`/models/${encodeURIComponent(model.model_id)}${model.revision ? `?revision=${encodeURIComponent(model.revision)}` : ''}`}
+                        className="text-lg font-semibold text-primary-600 hover:text-primary-700 truncate flex items-center space-x-2"
+                      >
+                        {getModelIcon(model)}
+                        <span>{model.model_id}</span>
+                      </Link>
+                      
+                      <div className="flex items-center space-x-2">
+                        {model.is_cached && (
+                          <span className="badge badge-success">
+                            <HardDrive className="w-3 h-3 mr-1" />
+                            Cached
+                          </span>
+                        )}
+                        
+                        {model.available_s3 && (
+                          <span className="badge badge-info">
+                            <Cloud className="w-3 h-3 mr-1" />
+                            S3
+                          </span>
+                        )}
+                        
+                        {model.is_full_model && (
+                          <span className="badge badge-success">
+                            <CheckCircle className="w-3 h-3 mr-1" />
+                            Full Model
+                          </span>
+                        )}
+                        
+                        {model.has_card && (
+                          <span className="badge badge-secondary">
+                            📄 Card
+                          </span>
+                        )}
+                        
+                        {model.has_config && (
+                          <span className="badge badge-secondary">
+                            <Settings className="w-3 h-3 mr-1" />
+                            Config
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-2 flex items-center space-x-4 text-sm text-gray-600">
+                      {model.revision && (
+                        <span>
+                          <strong>Revision:</strong> {model.revision}
+                        </span>
+                      )}
+                      {model.path && (
+                        <span>
+                          <strong>Path:</strong> {model.path}
+                        </span>
+                      )}
+                      <span>
+                        <strong>Type:</strong> {model.is_full_model ? 'Full Model' : 'Metadata Only'}
+                      </span>
+                      {model.has_tokenizer && (
+                        <span>
+                          <strong>Tokenizer:</strong> Yes
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center space-x-2 ml-4">
+                    {/* Cache button - only show for S3 models that aren't cached yet */}
+                    {model.available_s3 && !model.is_cached && (
+                      <button
+                        onClick={() => handleCache(model)}
+                        disabled={isCaching}
+                        className="btn-outline flex items-center space-x-2 disabled:opacity-50"
+                        title="Cache model on server"
+                      >
+                        {isCaching ? (
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary-600"></div>
+                        ) : (
+                          <Server className="w-4 h-4" />
+                        )}
+                        <span>
+                          {isCaching ? 'Caching...' : 'Cache'}
+                        </span>
+                      </button>
+                    )}
+
+                    <Link
+                      to={`/models/${encodeURIComponent(model.model_id)}${model.revision ? `?revision=${encodeURIComponent(model.revision)}` : ''}`}
+                      className="btn-primary"
+                    >
+                      View Details
+                    </Link>
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }; 

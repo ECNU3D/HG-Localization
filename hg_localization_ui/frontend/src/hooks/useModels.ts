@@ -6,6 +6,8 @@ import { ModelInfo, ModelDownloadRequest, ModelCard, ModelConfig, CodeExample } 
 export const modelKeys = {
   all: ['models'] as const,
   cached: () => [...modelKeys.all, 'cached'] as const,
+  s3: () => [...modelKeys.all, 's3'] as const,
+  allModels: () => [...modelKeys.all, 'allModels'] as const,
   detail: (modelId: string, revision?: string) => [...modelKeys.all, 'detail', modelId, revision] as const,
   card: (modelId: string, revision?: string) => [...modelKeys.all, 'card', modelId, revision] as const,
   config: (modelId: string, revision?: string) => [...modelKeys.all, 'config', modelId, revision] as const,
@@ -24,6 +26,28 @@ export const useCachedModels = () => {
   });
 };
 
+export const useS3Models = () => {
+  return useQuery({
+    queryKey: modelKeys.s3(),
+    queryFn: async (): Promise<ModelInfo[]> => {
+      const response = await api.models.getS3();
+      return response.data;
+    },
+    staleTime: 30 * 1000, // 30 seconds
+  });
+};
+
+export const useModels = () => {
+  return useQuery({
+    queryKey: modelKeys.allModels(),
+    queryFn: async (): Promise<ModelInfo[]> => {
+      const response = await api.models.getAll();
+      return response.data;
+    },
+    staleTime: 30 * 1000, // 30 seconds
+  });
+};
+
 // Hook for caching models
 export const useCacheModel = () => {
   const queryClient = useQueryClient();
@@ -34,8 +58,10 @@ export const useCacheModel = () => {
       return response.data;
     },
     onSuccess: () => {
-      // Invalidate cached models query to refresh the list
+      // Invalidate all model queries to refresh the lists
       queryClient.invalidateQueries({ queryKey: modelKeys.cached() });
+      queryClient.invalidateQueries({ queryKey: modelKeys.s3() });
+      queryClient.invalidateQueries({ queryKey: modelKeys.allModels() });
     },
   });
 };

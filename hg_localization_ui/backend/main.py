@@ -37,6 +37,7 @@ from hg_localization import (
 from hg_localization.model_manager import (
     download_model_metadata,
     list_local_models,
+    list_s3_models,
     get_cached_model_card_content,
     get_cached_model_config_content,
     get_model_card_content,
@@ -820,6 +821,112 @@ async def get_cached_models(request: Request):
         ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing cached models: {str(e)}")
+
+@app.get("/api/models/s3", response_model=List[ModelInfo])
+async def get_s3_models(request: Request):
+    """Get list of S3 models"""
+    config = get_config_from_request(request)
+    if not config or not config.s3_bucket_name:
+        raise HTTPException(status_code=400, detail="S3 bucket not configured")
+    
+    try:
+        models = list_s3_models(config=config)
+        return [
+            ModelInfo(
+                model_id=model["model_id"],
+                revision=model.get("revision"),
+                has_card=model.get("has_card", False),
+                has_config=model.get("has_config", False),
+                has_tokenizer=model.get("has_tokenizer", False),
+                is_full_model=model.get("is_full_model", False),
+                source="s3",
+                is_cached=False,
+                available_s3=True
+            )
+            for model in models
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing S3 models: {str(e)}")
+
+@app.get("/api/models/all", response_model=List[ModelInfo])
+async def get_all_models(request: Request):
+    """Get combined list of cached and S3 models that match the current bucket configuration"""
+    config = get_config_from_request(request)
+    
+    # Get cached models that match the current bucket configuration
+    try:
+        public_only = is_public_access_only(config)
+        # Filter models by bucket configuration to only show models from the current bucket
+        cached_models_raw = list_local_models(config=config, public_access_only=public_only, filter_by_bucket=True)
+        cached_models = [
+            ModelInfo(
+                model_id=model["model_id"],
+                revision=model.get("revision"),
+                path=model.get("path"),
+                has_card=model.get("has_card", False),
+                has_config=model.get("has_config", False),
+                has_tokenizer=model.get("has_tokenizer", False),
+                is_full_model=model.get("is_full_model", False),
+                source="cached",
+                is_cached=True,
+                available_s3=False
+            )
+            for model in cached_models_raw
+        ]
+    except Exception:
+        cached_models = []
+    
+    # Get S3 models
+    s3_models = []
+    if config and config.s3_bucket_name:
+        try:
+            s3_models_raw = list_s3_models(config=config)
+            s3_models = [
+                ModelInfo(
+                    model_id=model["model_id"],
+                    revision=model.get("revision"),
+                    has_card=model.get("has_card", False),
+                    has_config=model.get("has_config", False),
+                    has_tokenizer=model.get("has_tokenizer", False),
+                    is_full_model=model.get("is_full_model", False),
+                    source="s3",
+                    is_cached=False,
+                    available_s3=True
+                )
+                for model in s3_models_raw
+            ]
+        except Exception:
+            pass  # S3 might not be accessible
+    
+    # Combine and deduplicate
+    all_models = {}
+    
+    # Add cached models
+    for model in cached_models:
+        key = f"{model.model_id}_{model.revision}"
+        all_models[key] = model
+    
+    # Add S3 models (mark as available in S3)
+    for model in s3_models:
+        key = f"{model.model_id}_{model.revision}"
+        if key in all_models:
+            # Model exists both cached and in S3
+            existing = all_models[key]
+            existing.available_s3 = True
+            existing.source = "both"
+            if not existing.has_card and model.has_card:
+                existing.has_card = model.has_card
+            if not existing.has_config and model.has_config:
+                existing.has_config = model.has_config
+            if not existing.has_tokenizer and model.has_tokenizer:
+                existing.has_tokenizer = model.has_tokenizer
+            if not existing.is_full_model and model.is_full_model:
+                existing.is_full_model = model.is_full_model
+        else:
+            # Model only in S3
+            all_models[key] = model
+    
+    return list(all_models.values())
 
 @app.post("/api/models/cache")
 async def cache_model_endpoint(request: ModelDownloadRequest, background_tasks: BackgroundTasks, req: Request):

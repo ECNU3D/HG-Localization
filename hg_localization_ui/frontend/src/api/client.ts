@@ -130,6 +130,12 @@ export const api = {
     getCached: (): Promise<AxiosResponse<ModelInfo[]>> =>
       apiClient.get('/models/cached'),
     
+    getS3: (): Promise<AxiosResponse<ModelInfo[]>> =>
+      apiClient.get('/models/s3'),
+    
+    getAll: (): Promise<AxiosResponse<ModelInfo[]>> =>
+      apiClient.get('/models/all'),
+    
     cache: (request: ModelDownloadRequest): Promise<AxiosResponse<{ message: string; model_id: string }>> =>
       apiClient.post('/models/cache', request),
     

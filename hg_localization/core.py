@@ -38,6 +38,7 @@ from .dataset_manager import (
 from .model_manager import (
     download_model_metadata,
     list_local_models,
+    list_s3_models,
     get_model_card_url,
     get_model_card_content,
     get_cached_model_card_content,
@@ -81,6 +82,7 @@ __all__ = [
     # Model Management Functions
     "download_model_metadata",
     "list_local_models",
+    "list_s3_models",
     
     # Model Card and Config Utilities
     "get_model_card_url",
