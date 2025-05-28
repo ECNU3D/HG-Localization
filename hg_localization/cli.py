@@ -24,7 +24,7 @@ def cli():
 
 # --- Dataset Commands ---
 
-@cli.command("download-dataset")
+@cli.command("download")
 @click.argument('dataset_id')
 @click.option('--name', '-n', default=None, help='The specific dataset configuration name (e.g., "mrpc" for glue, "en" for wikiann).')
 @click.option('--revision', '-r', default=None, help='The git revision (branch, tag, commit hash) of the dataset.')
@@ -49,7 +49,7 @@ def download_dataset_cmd(dataset_id: str, name: str | None, revision: str | None
     else:
         click.secho(f"Failed to process '{dataset_id}'. Error: {message}", fg="red")
 
-@cli.command("list-local-datasets")
+@cli.command("list-local")
 def list_local_datasets_cmd():
     """Lists datasets available in the local cache."""
     click.echo("Listing local datasets from cache...")
@@ -64,7 +64,7 @@ def list_local_datasets_cmd():
         rev = ds_info.get('revision') or 'default'      # Display 'default' if None
         click.echo(f"  - ID: {click.style(ds_id, fg='blue')}, Config: {click.style(cfg_name, fg='green')}, Revision: {click.style(rev, fg='yellow')}")
 
-@cli.command("list-s3-datasets")
+@cli.command("list-s3")
 def list_s3_datasets_cmd():
     """Lists datasets available in the configured S3 bucket."""
     click.echo("Listing datasets from S3...")
@@ -87,7 +87,7 @@ def list_s3_datasets_cmd():
             output += ", Card (S3): Not available"
         click.echo(output)
 
-@cli.command("sync-local-dataset-to-s3")
+@cli.command("sync-local-to-s3")
 @click.argument('dataset_id')
 @click.option('--name', '-n', default=None, help='The specific dataset configuration name. Optional.')
 @click.option('--revision', '-r', default=None, help='The git revision of the dataset. Optional.')

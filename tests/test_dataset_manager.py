@@ -870,10 +870,10 @@ def test_upload_dataset_s3_not_configured(
 ):
     dataset_id = "upload_no_s3_config"
     # Simulate S3 not configured
-    config = HGLocalizationConfig(s3_bucket_name=None)
+    config = HGLocalizationConfig(s3_bucket_name=None, datasets_store_path=temp_datasets_store)
     mock_s3_utils_for_dm["_get_s3_client"].return_value = None # Or s3_client is None
 
-    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True, config=default_config) # make_public should be skipped
+    success = upload_dataset(mock_dataset_obj, dataset_id, make_public=True, config=config) # make_public should be skipped
 
     assert success is True # True because local save succeeded
     mock_dataset_obj.save_to_disk.assert_called_once()
@@ -882,7 +882,7 @@ def test_upload_dataset_s3_not_configured(
     mock_utils_for_dm["_zip_directory"].assert_not_called() # make_public part skipped
     
     captured = capsys.readouterr()
-    expected_local_path = _get_dataset_path(dataset_id, config=default_config) # Get expected path
+    expected_local_path = _get_dataset_path(dataset_id, config=config) # Get expected path
     assert f"Dataset '{dataset_id}' (config: default, revision: default) successfully saved to local cache: {expected_local_path}" in captured.out
     assert "S3 not configured or client init failed; skipping S3 upload." in captured.out
     assert "Cannot make dataset public as S3 is not configured." in captured.out # Because make_public was True

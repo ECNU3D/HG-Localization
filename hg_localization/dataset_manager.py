@@ -377,7 +377,8 @@ def download_dataset(dataset_id: str, config_name: Optional[str] = None, revisio
                     if not tmp_download_zip_file.closed: tmp_download_zip_file.close()
                     try:
                         os.remove(tmp_zip_file_path)
-                    except OSError: pass
+                    except OSError: 
+                        pass
         else:
             print(f"Dataset '{dataset_id}' {version_str} not found in public S3 dataset list or info was incomplete.")
 
@@ -457,7 +458,8 @@ def download_dataset(dataset_id: str, config_name: Optional[str] = None, revisio
                                 print(f"Failed to zip dataset for public upload.")
                             try:
                                 os.remove(tmp_zip_file_path)
-                            except OSError: pass
+                            except OSError: 
+                                pass
         return True, str(local_save_path)
 
     except FileNotFoundError:
@@ -573,7 +575,8 @@ def load_local_dataset(dataset_id: str, config_name: Optional[str] = None, revis
                         if not tmp_download_zip_file.closed: tmp_download_zip_file.close()
                         try:
                             os.remove(tmp_zip_file_path)
-                        except OSError: pass
+                        except OSError: 
+                            pass
             else:
                  if not (local_dataset_path and local_dataset_path.exists() and \
                         ((local_dataset_path / "dataset_info.json").exists() or \
@@ -601,7 +604,9 @@ def upload_dataset(dataset_obj: Dataset | DatasetDict, dataset_id: str, config_n
         
     version_str = f"(config: {config_name or 'default'}, revision: {revision or 'default'})"
     print(f"Processing dataset for upload: {dataset_id} {version_str}")
-    local_save_path = _get_dataset_path(dataset_id, config_name, revision, config, is_public=make_public)
+    # For upload_dataset, always save to private cache regardless of make_public flag
+    # make_public only controls S3 public access, not local storage location
+    local_save_path = _get_dataset_path(dataset_id, config_name, revision, config, is_public=False)
 
     try:
         print(f"Saving dataset to local cache at {local_save_path}...")
@@ -610,7 +615,7 @@ def upload_dataset(dataset_obj: Dataset | DatasetDict, dataset_id: str, config_n
         print(f"Dataset '{dataset_id}' {version_str} successfully saved to local cache: {local_save_path}")
         
         # Store bucket metadata for the uploaded dataset to ensure it's properly tracked
-        _store_dataset_bucket_metadata(dataset_id, config_name, revision, config, is_public=make_public)
+        _store_dataset_bucket_metadata(dataset_id, config_name, revision, config, is_public=False)
         
         # Create a basic dataset card for uploaded datasets
         card_file_path = local_save_path / "dataset_card.md"
@@ -709,11 +714,12 @@ dataset = load_local_dataset(
                             print(f"Failed to zip dataset for public upload.")
                         try:
                             os.remove(tmp_zip_file_path)
-                        except OSError: pass
+                        except OSError: 
+                            pass
             return True 
         except Exception as e:
             print(f"Error uploading dataset '{dataset_id}' {version_str} to S3: {e}")
-            return False 
+            return False
     else: 
         print("S3 not configured or client init failed; skipping S3 upload. Dataset is saved locally.")
         if make_public:
@@ -1039,8 +1045,10 @@ def sync_local_dataset_to_s3(dataset_id: str, config_name: Optional[str] = None,
                         except Exception as ex_zip_upload:
                             print(f"Failed during public zip creation/upload for {s3_zip_key_full}: {ex_zip_upload}")
                         finally:
-                            try: os.remove(tmp_zip_file_path) 
-                            except OSError: pass
+                            try:
+                                os.remove(tmp_zip_file_path) 
+                            except OSError: 
+                                pass
                         if not zip_creation_upload_success:
                              print(f"Skipping manifest update for {dataset_id} {version_str} due to zip creation/upload failure.")
             else:
