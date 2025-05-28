@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useParams, useSearchParams, Link } from 'react-router-dom';
 import { ArrowLeft, Eye, FileText, Code, Download, ExternalLink, ChevronDown, ChevronRight, Copy, Check } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import Editor from '@monaco-editor/react';
 import { 
   useDatasetPreview, 
@@ -457,7 +458,7 @@ export const DatasetDetailPage: React.FC = () => {
               </div>
             ) : card ? (
               <div className="prose max-w-none">
-                <ReactMarkdown>{card.content}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{card.content}</ReactMarkdown>
               </div>
             ) : (
               <div className="text-center py-12">

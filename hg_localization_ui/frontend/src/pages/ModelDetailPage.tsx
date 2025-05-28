@@ -15,6 +15,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import Editor from '@monaco-editor/react';
 import { useModelCard, useModelConfig, useModelExamples } from '../hooks/useModels';
 import { CodeExample } from '../types';
@@ -143,7 +144,7 @@ export const ModelDetailPage: React.FC = () => {
 
     return (
       <div className="prose max-w-none">
-        <ReactMarkdown>{modelCard.content}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{modelCard.content}</ReactMarkdown>
       </div>
     );
   };
