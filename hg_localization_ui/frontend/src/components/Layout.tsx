@@ -86,14 +86,20 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
                 <div
                   className={`w-2 h-2 rounded-full ${
                     configStatus?.configured
-                      ? 'bg-green-500'
-                      : 'bg-yellow-500'
+                      ? configStatus.has_credentials && configStatus.credentials_valid
+                        ? 'bg-green-500'
+                        : configStatus.has_credentials && !configStatus.credentials_valid
+                        ? 'bg-red-500'
+                        : 'bg-yellow-500'
+                      : 'bg-gray-400'
                   }`}
                 />
                 <span className="text-sm text-gray-600">
                   {configStatus?.configured
-                    ? configStatus.has_credentials
+                    ? configStatus.has_credentials && configStatus.credentials_valid
                       ? 'Private Access'
+                      : configStatus.has_credentials && !configStatus.credentials_valid
+                      ? 'Credentials Invalid (Public Access)'
                       : 'Public Access'
                     : 'Not Configured'}
                 </span>

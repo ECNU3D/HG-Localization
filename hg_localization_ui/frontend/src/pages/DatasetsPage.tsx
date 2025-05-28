@@ -96,9 +96,19 @@ export const DatasetsPage: React.FC = () => {
         
         <div className="mt-4 sm:mt-0 flex items-center space-x-3">
           <div className="flex items-center space-x-2 text-sm text-gray-600">
-            <div className="w-2 h-2 rounded-full bg-green-500"></div>
+            <div className={`w-2 h-2 rounded-full ${
+              configStatus?.has_credentials && configStatus?.credentials_valid
+                ? 'bg-green-500'
+                : configStatus?.has_credentials && !configStatus?.credentials_valid
+                ? 'bg-red-500'
+                : 'bg-yellow-500'
+            }`}></div>
             <span>
-              {configStatus?.has_credentials ? 'Private Access' : 'Public Access'}
+              {configStatus?.has_credentials && configStatus?.credentials_valid
+                ? 'Private Access'
+                : configStatus?.has_credentials && !configStatus?.credentials_valid
+                ? 'Credentials Invalid (Public Access)'
+                : 'Public Access'}
             </span>
           </div>
           

@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Save, AlertCircle, CheckCircle, Info } from 'lucide-react';
-import { useConfigStatus, useSetConfig } from '../hooks/useConfig';
+import { Save, AlertCircle, CheckCircle, Info, Trash2 } from 'lucide-react';
+import { useConfigStatus, useSetConfig, useClearConfig } from '../hooks/useConfig';
 import { S3Config } from '../types';
 
 export const ConfigurationPage: React.FC = () => {
   const navigate = useNavigate();
   const { data: configStatus, isLoading } = useConfigStatus();
   const setConfigMutation = useSetConfig();
+  const clearConfigMutation = useClearConfig();
 
   const [formData, setFormData] = useState<S3Config>({
     s3_bucket_name: '',
@@ -229,16 +230,64 @@ export const ConfigurationPage: React.FC = () => {
         {configStatus?.configured && (
           <div className="card">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Current Status</h2>
-            <div className="flex items-center space-x-2">
-              <CheckCircle className="w-5 h-5 text-green-600" />
-              <span className="text-green-800">
-                Connected to bucket: <code className="bg-gray-100 px-2 py-1 rounded text-sm">
-                  {configStatus.bucket_name}
-                </code>
-              </span>
-            </div>
-            <div className="mt-2 text-sm text-gray-600">
-              Access level: {configStatus.has_credentials ? 'Private' : 'Public'}
+            <div className="space-y-3">
+              <div className="flex items-center space-x-2">
+                <CheckCircle className="w-5 h-5 text-green-600" />
+                <span className="text-green-800">
+                  Connected to bucket: <code className="bg-gray-100 px-2 py-1 rounded text-sm">
+                    {configStatus.bucket_name}
+                  </code>
+                </span>
+              </div>
+              
+              <div className="flex items-center space-x-2">
+                {configStatus.has_credentials && configStatus.credentials_valid ? (
+                  <>
+                    <CheckCircle className="w-5 h-5 text-green-600" />
+                    <span className="text-green-800">Private Access - Credentials Valid</span>
+                  </>
+                ) : configStatus.has_credentials && !configStatus.credentials_valid ? (
+                  <>
+                    <AlertCircle className="w-5 h-5 text-red-600" />
+                    <span className="text-red-800">Credentials Invalid - Using Public Access</span>
+                  </>
+                ) : (
+                  <>
+                    <Info className="w-5 h-5 text-blue-600" />
+                    <span className="text-blue-800">Public Access Only</span>
+                  </>
+                )}
+              </div>
+              
+              {configStatus.has_credentials && !configStatus.credentials_valid && (
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                  <div className="flex">
+                    <AlertCircle className="w-5 h-5 text-yellow-600 mt-0.5 mr-2 flex-shrink-0" />
+                    <div className="text-sm text-yellow-800">
+                      <p className="font-medium">Credentials Issue</p>
+                      <p>
+                        Your AWS credentials may have expired or are invalid. 
+                        The system has automatically switched to public access mode. 
+                        Please update your credentials to restore private access.
+                      </p>
+                      <div className="mt-3">
+                        <button
+                          onClick={() => clearConfigMutation.mutate()}
+                          disabled={clearConfigMutation.isPending}
+                          className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded text-yellow-800 bg-yellow-100 hover:bg-yellow-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 disabled:opacity-50"
+                        >
+                          {clearConfigMutation.isPending ? (
+                            <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-yellow-800 mr-1"></div>
+                          ) : (
+                            <Trash2 className="w-3 h-3 mr-1" />
+                          )}
+                          Clear Invalid Configuration
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

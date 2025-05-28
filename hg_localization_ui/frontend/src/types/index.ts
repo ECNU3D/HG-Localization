@@ -9,6 +9,7 @@ export interface S3Config {
 export interface ConfigStatus {
   configured: boolean;
   has_credentials: boolean;
+  credentials_valid: boolean;
   bucket_name?: string;
   endpoint_url?: string;
   data_prefix?: string;

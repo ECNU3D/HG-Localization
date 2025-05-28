@@ -608,9 +608,9 @@ def list_s3_models(config: Optional[HGLocalizationConfig] = None) -> List[Dict[s
                                 if not revision_safe:
                                     continue
                                 
-                                # Restore original revision
-                                revision_orig = _restore_dataset_name(revision_safe)
-                                revision_display = revision_orig if revision_orig != config.default_revision_name else None
+                                # For revisions, don't use _restore_dataset_name since revisions don't contain slashes
+                                # Just use the revision_safe directly
+                                revision_display = revision_safe if revision_safe != config.default_revision_name else None
                                 
                                 # Check if this model has a card
                                 s3_card_key = f"{revision_prefix}model_card.md"

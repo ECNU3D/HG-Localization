@@ -44,6 +44,19 @@ apiClient.interceptors.response.use(
   },
   (error) => {
     console.error('API Response Error:', error.response?.data || error.message);
+    
+    // Check for authentication/authorization errors that might indicate expired credentials
+    if (error.response?.status === 403 || error.response?.status === 401) {
+      console.warn('Authentication error detected - credentials may be invalid');
+      // Trigger a config status refresh by dispatching a custom event
+      window.dispatchEvent(new CustomEvent('auth-error', { 
+        detail: { 
+          status: error.response?.status, 
+          message: error.response?.data?.detail || 'Authentication failed' 
+        } 
+      }));
+    }
+    
     return Promise.reject(error);
   }
 );
@@ -56,6 +69,9 @@ export const api = {
     
     getStatus: (): Promise<AxiosResponse<ConfigStatus>> =>
       apiClient.get('/config/status'),
+    
+    clearConfig: (): Promise<AxiosResponse<{ message: string }>> =>
+      apiClient.delete('/config'),
   },
 
   // Dataset endpoints

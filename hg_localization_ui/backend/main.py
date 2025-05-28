@@ -52,6 +52,9 @@ from hg_localization.dataset_manager import (
     _get_dataset_path
 )
 
+# Import S3 client function for credential validation
+from hg_localization.s3_utils import _get_s3_client
+
 # Cookie configuration
 COOKIE_NAME = "hg_localization_config"
 COOKIE_MAX_AGE = 30 * 24 * 60 * 60  # 30 days in seconds
@@ -115,6 +118,7 @@ class S3Config(BaseModel):
 class ConfigStatus(BaseModel):
     configured: bool
     has_credentials: bool
+    credentials_valid: bool = False  # New field to track if credentials actually work
     bucket_name: Optional[str]
     endpoint_url: Optional[str]
     data_prefix: Optional[str]
@@ -209,8 +213,16 @@ def get_config_from_request(request: Request) -> Optional[HGLocalizationConfig]:
     )
 
 def is_public_access_only(config: Optional[HGLocalizationConfig]) -> bool:
-    """Determine if this is public access only (no credentials provided)"""
-    return config is None or not config.has_credentials()
+    """Determine if this is public access only (no credentials provided or credentials invalid)"""
+    if config is None or not config.has_credentials():
+        return True
+    
+    # Test if credentials are actually valid
+    try:
+        s3_client = _get_s3_client(config)
+        return s3_client is None
+    except Exception:
+        return True
 
 def get_config_status_from_config(config: Optional[HGLocalizationConfig]) -> ConfigStatus:
     """Get configuration status from HGLocalizationConfig object"""
@@ -218,14 +230,29 @@ def get_config_status_from_config(config: Optional[HGLocalizationConfig]) -> Con
         return ConfigStatus(
             configured=False,
             has_credentials=False,
+            credentials_valid=False,
             bucket_name=None,
             endpoint_url=None,
             data_prefix=None
         )
     
+    # Check if credentials are provided
+    has_credentials = config.has_credentials()
+    credentials_valid = False
+    
+    # If credentials are provided, test if they actually work
+    if has_credentials:
+        try:
+            s3_client = _get_s3_client(config)
+            credentials_valid = s3_client is not None
+        except Exception as e:
+            print(f"Error validating S3 credentials: {e}")
+            credentials_valid = False
+    
     return ConfigStatus(
         configured=bool(config.s3_bucket_name),
-        has_credentials=config.has_credentials(),
+        has_credentials=has_credentials,
+        credentials_valid=credentials_valid,
         bucket_name=config.s3_bucket_name,
         endpoint_url=config.s3_endpoint_url,
         data_prefix=config.s3_data_prefix
@@ -275,6 +302,17 @@ async def get_config_status(request: Request):
     """Get current configuration status from cookie"""
     config = get_config_from_request(request)
     return get_config_status_from_config(config)
+
+@app.delete("/api/config")
+async def clear_config(response: Response):
+    """Clear S3 configuration cookie"""
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        httponly=True,
+        secure=False,  # Set to True in production with HTTPS
+        samesite="lax"
+    )
+    return {"message": "Configuration cleared successfully"}
 
 # Dataset endpoints
 @app.get("/api/datasets/cached", response_model=List[DatasetInfo])
