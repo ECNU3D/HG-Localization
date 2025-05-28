@@ -237,4 +237,126 @@ def get_s3_dataset_card_presigned_url(dataset_id: str, config_name: Optional[str
         return None
     except Exception as e:
         print(f"Unexpected error generating presigned URL for {s3_card_key}: {e}")
-        return None 
+        return None
+
+# --- Public Models Manifest (public_models.json) Utilities ---
+
+def _update_public_models_json(s3_client: Any, bucket_name: str, model_id: str, revision: Optional[str], config: Optional[HGLocalizationConfig] = None) -> bool:
+    """Updates the public_models.json file in S3 with model metadata information."""
+    if config is None:
+        config = default_config
+        
+    if not s3_client: return False
+    
+    current_config_data = {}
+    full_json_s3_key = _get_prefixed_s3_key(config.public_models_json_key, config)
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=full_json_s3_key)
+        current_config_data = json.loads(response['Body'].read().decode('utf-8'))
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            print(f"{full_json_s3_key} not found in S3, will create a new one.")
+        else:
+            print(f"Error fetching {full_json_s3_key} from S3: {e}")
+            return False
+    except json.JSONDecodeError:
+        print(f"Error: {full_json_s3_key} in S3 is corrupted. Will overwrite.")
+        current_config_data = {}
+
+    # For models, we use model_id and revision (no config_name like datasets)
+    entry_key = f"{model_id}---{revision or config.default_revision_name}"
+    
+    # Generate public URLs for model card and config if they exist
+    from .model_manager import _get_model_s3_prefix
+    s3_prefix_path = _get_model_s3_prefix(model_id, revision, config)
+    
+    model_card_key = f"{s3_prefix_path}/model_card.md"
+    model_config_key = f"{s3_prefix_path}/config.json"
+    
+    # Check if files exist and generate public URLs
+    model_card_url = None
+    model_config_url = None
+    
+    try:
+        s3_client.head_object(Bucket=bucket_name, Key=model_card_key)
+        model_card_url = _get_s3_public_url(bucket_name, model_card_key, config.s3_endpoint_url)
+    except ClientError:
+        pass  # Model card doesn't exist
+    
+    try:
+        s3_client.head_object(Bucket=bucket_name, Key=model_config_key)
+        model_config_url = _get_s3_public_url(bucket_name, model_config_key, config.s3_endpoint_url)
+    except ClientError:
+        pass  # Model config doesn't exist
+    
+    current_config_data[entry_key] = {
+        "model_id": model_id,
+        "revision": revision,
+        "s3_bucket": bucket_name,
+        "model_card_url": model_card_url,
+        "model_config_url": model_config_url,
+        "s3_prefix": s3_prefix_path  # Store the S3 prefix for reference
+    }
+
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=full_json_s3_key,
+            Body=json.dumps(current_config_data, indent=2),
+            ContentType='application/json',
+            ACL='public-read'
+        )
+        print(f"Successfully updated and published {full_json_s3_key} in S3.")
+        return True
+    except Exception as e:
+        print(f"Error uploading {full_json_s3_key} to S3: {e}")
+        return False
+
+def _make_model_metadata_public(s3_client: Any, bucket_name: str, model_id: str, revision: Optional[str], local_model_path: Path, config: Optional[HGLocalizationConfig] = None) -> bool:
+    """Makes model metadata files (card and config) public by uploading them with public-read ACL."""
+    if config is None:
+        config = default_config
+        
+    if not s3_client or not bucket_name:
+        return False
+    
+    from .model_manager import _get_model_s3_prefix
+    s3_prefix_path = _get_model_s3_prefix(model_id, revision, config)
+    
+    success = True
+    
+    # Upload model card if it exists
+    model_card_file = local_model_path / "model_card.md"
+    if model_card_file.exists():
+        model_card_s3_key = f"{s3_prefix_path}/model_card.md"
+        try:
+            print(f"Making model card public: s3://{bucket_name}/{model_card_s3_key}")
+            s3_client.upload_file(
+                str(model_card_file),
+                bucket_name,
+                model_card_s3_key,
+                ExtraArgs={'ACL': 'public-read', 'ContentType': 'text/markdown'}
+            )
+            print(f"Successfully made model card public at {model_card_s3_key}")
+        except Exception as e:
+            print(f"Failed to make model card public: {e}")
+            success = False
+    
+    # Upload model config if it exists
+    model_config_file = local_model_path / "config.json"
+    if model_config_file.exists():
+        model_config_s3_key = f"{s3_prefix_path}/config.json"
+        try:
+            print(f"Making model config public: s3://{bucket_name}/{model_config_s3_key}")
+            s3_client.upload_file(
+                str(model_config_file),
+                bucket_name,
+                model_config_s3_key,
+                ExtraArgs={'ACL': 'public-read', 'ContentType': 'application/json'}
+            )
+            print(f"Successfully made model config public at {model_config_s3_key}")
+        except Exception as e:
+            print(f"Failed to make model config public: {e}")
+            success = False
+    
+    return success 

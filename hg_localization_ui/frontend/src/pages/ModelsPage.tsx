@@ -6,7 +6,7 @@ import { useConfigStatus } from '../hooks/useConfig';
 import { ModelInfo } from '../types';
 
 export const ModelsPage: React.FC = () => {
-  const { data: models, isLoading, refetch } = useModels();
+  const { data: models, isLoading, isFetching, refetch } = useModels();
   const { data: configStatus } = useConfigStatus();
   const cacheMutation = useCacheModel();
 
@@ -106,10 +106,11 @@ export const ModelsPage: React.FC = () => {
           
           <button
             onClick={() => refetch()}
-            className="btn-outline flex items-center space-x-2"
+            disabled={isFetching}
+            className="btn-outline flex items-center space-x-2 disabled:opacity-50"
           >
-            <RefreshCw className="w-4 h-4" />
-            <span>Refresh</span>
+            <RefreshCw className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
+            <span>{isFetching ? 'Refreshing...' : 'Refresh'}</span>
           </button>
         </div>
       </div>
@@ -180,7 +181,17 @@ export const ModelsPage: React.FC = () => {
         </div>
       </div>
 
-      <div className="space-y-4">
+      <div className="space-y-4 relative">
+        {/* Loading overlay during refresh */}
+        {isFetching && !isLoading && (
+          <div className="absolute inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50 rounded-lg">
+            <div className="text-center">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600 mx-auto mb-2"></div>
+              <p className="text-sm text-gray-600">Refreshing models...</p>
+            </div>
+          </div>
+        )}
+        
         {filteredModels.length === 0 ? (
           <div className="card text-center py-12">
             <Brain className="w-12 h-12 text-gray-400 mx-auto mb-4" />
@@ -202,7 +213,17 @@ export const ModelsPage: React.FC = () => {
             const isCaching = cachingModels.has(modelKey);
             
             return (
-              <div key={modelKey} className="card hover:shadow-md transition-shadow">
+              <div key={modelKey} className="card hover:shadow-md transition-shadow relative">
+                {/* Individual loading mask during cache operation */}
+                {isCaching && (
+                  <div className="absolute inset-0 bg-white bg-opacity-75 flex items-center justify-center z-40 rounded-lg">
+                    <div className="text-center">
+                      <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary-600 mx-auto mb-1"></div>
+                      <p className="text-xs text-gray-600">Caching...</p>
+                    </div>
+                  </div>
+                )}
+                
                 <div className="flex items-center justify-between">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center space-x-3">

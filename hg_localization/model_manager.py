@@ -14,7 +14,7 @@ from .utils import _get_safe_path_component, _restore_dataset_name, _zip_directo
 from .s3_utils import (
     _get_s3_client, _get_s3_prefix, _get_prefixed_s3_key,
     _upload_directory_to_s3, _download_directory_from_s3,
-    _get_s3_public_url
+    _get_s3_public_url, _update_public_models_json, _make_model_metadata_public
 )
 
 # --- Path Utilities specific to model_manager ---
@@ -130,23 +130,37 @@ def get_model_config_content(model_id: str, revision: Optional[str] = None) -> O
         return None
 
 def get_cached_model_card_content(model_id: str, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None) -> Optional[str]:
-    """Retrieves model card content, prioritizing local cache, then private S3."""
+    """Retrieves model card content, prioritizing local cache (public then private), then private S3, then public URLs."""
     if config is None:
         config = default_config
         
-    local_model_dir = _get_model_path(model_id, revision, config)
-    local_card_file_path = local_model_dir / "model_card.md"
     version_str = f"(model: {model_id}, revision: {revision or 'default'})"
-
-    if local_card_file_path.exists() and local_card_file_path.is_file():
-        print(f"Found model card locally for {version_str} at {local_card_file_path}")
+    
+    # Check public cache first (preferred)
+    public_model_dir = _get_model_path(model_id, revision, config, is_public=True)
+    public_card_file_path = public_model_dir / "model_card.md"
+    
+    if public_card_file_path.exists() and public_card_file_path.is_file():
+        print(f"Found model card in public cache for {version_str} at {public_card_file_path}")
         try:
-            with open(local_card_file_path, "r", encoding="utf-8") as f:
+            with open(public_card_file_path, "r", encoding="utf-8") as f:
                 return f.read()
         except IOError as e:
-            print(f"Error reading local model card {local_card_file_path}: {e}")
+            print(f"Error reading public model card {public_card_file_path}: {e}")
+    
+    # Check private cache second
+    private_model_dir = _get_model_path(model_id, revision, config, is_public=False)
+    private_card_file_path = private_model_dir / "model_card.md"
+    
+    if private_card_file_path.exists() and private_card_file_path.is_file():
+        print(f"Found model card in private cache for {version_str} at {private_card_file_path}")
+        try:
+            with open(private_card_file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except IOError as e:
+            print(f"Error reading private model card {private_card_file_path}: {e}")
 
-    print(f"Model card not found or readable locally for {version_str}. Checking S3 (private path)...")
+    print(f"Model card not found locally for {version_str}. Checking S3 (private path)...")
     s3_client = _get_s3_client(config)
     if s3_client and config.s3_bucket_name:
         s3_prefix_path = _get_model_s3_prefix(model_id, revision, config)
@@ -154,10 +168,10 @@ def get_cached_model_card_content(model_id: str, revision: Optional[str] = None,
         
         try:
             print(f"Attempting to download model card from S3: s3://{config.s3_bucket_name}/{s3_card_key}")
-            os.makedirs(local_model_dir, exist_ok=True)
-            s3_client.download_file(config.s3_bucket_name, s3_card_key, str(local_card_file_path))
-            print(f"Successfully downloaded model card from S3 to {local_card_file_path}")
-            with open(local_card_file_path, "r", encoding="utf-8") as f:
+            os.makedirs(public_model_dir, exist_ok=True)
+            s3_client.download_file(config.s3_bucket_name, s3_card_key, str(public_card_file_path))
+            print(f"Successfully downloaded model card from S3 to {public_card_file_path}")
+            with open(public_card_file_path, "r", encoding="utf-8") as f:
                 return f.read()
         except ClientError as e:
             if e.response.get('Error', {}).get('Code') == '404':
@@ -165,31 +179,69 @@ def get_cached_model_card_content(model_id: str, revision: Optional[str] = None,
             else:
                 print(f"S3 ClientError when trying to download model card {s3_card_key}: {e}")
         except IOError as e:
-            print(f"IOError after downloading model card from S3 {local_card_file_path}: {e}")
+            print(f"IOError after downloading model card from S3 {public_card_file_path}: {e}")
         except Exception as e:
             print(f"Unexpected error downloading/reading model card from S3 {s3_card_key}: {e}")
     else:
         print("S3 client not available or bucket not configured. Cannot fetch model card from S3.")
+    
+    # Fallback: Try to fetch from public models manifest if S3 credentials not available
+    if not s3_client or not config.s3_bucket_name:
+        print(f"Attempting to fetch model card from public models manifest for {version_str}...")
+        public_model_info = _fetch_public_model_info(model_id, revision, config)
+        if public_model_info and public_model_info.get('model_card_url'):
+            card_url = public_model_info['model_card_url']
+            print(f"Found public model card URL: {card_url}")
+            try:
+                import requests
+                response = requests.get(card_url, timeout=10)
+                response.raise_for_status()
+                
+                # Cache the downloaded content locally
+                os.makedirs(public_model_dir, exist_ok=True)
+                with open(public_card_file_path, "w", encoding="utf-8") as f:
+                    f.write(response.text)
+                print(f"Successfully downloaded and cached model card from public URL to {public_card_file_path}")
+                return response.text
+            except Exception as e:
+                print(f"Error fetching model card from public URL {card_url}: {e}")
+        else:
+            print(f"No public model card URL found for {version_str}")
+    
     return None
 
 def get_cached_model_config_content(model_id: str, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None) -> Optional[Dict[str, Any]]:
-    """Retrieves model config content, prioritizing local cache, then private S3."""
+    """Retrieves model config content, prioritizing local cache (public then private), then private S3, then public URLs."""
     if config is None:
         config = default_config
         
-    local_model_dir = _get_model_path(model_id, revision, config)
-    local_config_file_path = local_model_dir / "config.json"
     version_str = f"(model: {model_id}, revision: {revision or 'default'})"
-
-    if local_config_file_path.exists() and local_config_file_path.is_file():
-        print(f"Found model config locally for {version_str} at {local_config_file_path}")
+    
+    # Check public cache first (preferred)
+    public_model_dir = _get_model_path(model_id, revision, config, is_public=True)
+    public_config_file_path = public_model_dir / "config.json"
+    
+    if public_config_file_path.exists() and public_config_file_path.is_file():
+        print(f"Found model config in public cache for {version_str} at {public_config_file_path}")
         try:
-            with open(local_config_file_path, "r", encoding="utf-8") as f:
+            with open(public_config_file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (IOError, json.JSONDecodeError) as e:
-            print(f"Error reading local model config {local_config_file_path}: {e}")
+            print(f"Error reading public model config {public_config_file_path}: {e}")
+    
+    # Check private cache second
+    private_model_dir = _get_model_path(model_id, revision, config, is_public=False)
+    private_config_file_path = private_model_dir / "config.json"
+    
+    if private_config_file_path.exists() and private_config_file_path.is_file():
+        print(f"Found model config in private cache for {version_str} at {private_config_file_path}")
+        try:
+            with open(private_config_file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"Error reading private model config {private_config_file_path}: {e}")
 
-    print(f"Model config not found or readable locally for {version_str}. Checking S3 (private path)...")
+    print(f"Model config not found locally for {version_str}. Checking S3 (private path)...")
     s3_client = _get_s3_client(config)
     if s3_client and config.s3_bucket_name:
         s3_prefix_path = _get_model_s3_prefix(model_id, revision, config)
@@ -197,10 +249,10 @@ def get_cached_model_config_content(model_id: str, revision: Optional[str] = Non
         
         try:
             print(f"Attempting to download model config from S3: s3://{config.s3_bucket_name}/{s3_config_key}")
-            os.makedirs(local_model_dir, exist_ok=True)
-            s3_client.download_file(config.s3_bucket_name, s3_config_key, str(local_config_file_path))
-            print(f"Successfully downloaded model config from S3 to {local_config_file_path}")
-            with open(local_config_file_path, "r", encoding="utf-8") as f:
+            os.makedirs(public_model_dir, exist_ok=True)
+            s3_client.download_file(config.s3_bucket_name, s3_config_key, str(public_config_file_path))
+            print(f"Successfully downloaded model config from S3 to {public_config_file_path}")
+            with open(public_config_file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except ClientError as e:
             if e.response.get('Error', {}).get('Code') == '404':
@@ -208,12 +260,88 @@ def get_cached_model_config_content(model_id: str, revision: Optional[str] = Non
             else:
                 print(f"S3 ClientError when trying to download model config {s3_config_key}: {e}")
         except (IOError, json.JSONDecodeError) as e:
-            print(f"Error after downloading model config from S3 {local_config_file_path}: {e}")
+            print(f"Error after downloading model config from S3 {public_config_file_path}: {e}")
         except Exception as e:
             print(f"Unexpected error downloading/reading model config from S3 {s3_config_key}: {e}")
     else:
         print("S3 client not available or bucket not configured. Cannot fetch model config from S3.")
+    
+    # Fallback: Try to fetch from public models manifest if S3 credentials not available
+    if not s3_client or not config.s3_bucket_name:
+        print(f"Attempting to fetch model config from public models manifest for {version_str}...")
+        public_model_info = _fetch_public_model_info(model_id, revision, config)
+        if public_model_info and public_model_info.get('model_config_url'):
+            config_url = public_model_info['model_config_url']
+            print(f"Found public model config URL: {config_url}")
+            try:
+                import requests
+                response = requests.get(config_url, timeout=10)
+                response.raise_for_status()
+                config_data = response.json()
+                
+                # Cache the downloaded content locally
+                os.makedirs(public_model_dir, exist_ok=True)
+                with open(public_config_file_path, "w", encoding="utf-8") as f:
+                    json.dump(config_data, f, indent=2)
+                print(f"Successfully downloaded and cached model config from public URL to {public_config_file_path}")
+                return config_data
+            except Exception as e:
+                print(f"Error fetching model config from public URL {config_url}: {e}")
+        else:
+            print(f"No public model config URL found for {version_str}")
+    
     return None
+
+# --- Public Models Manifest Fetching (via URL) ---
+
+def _fetch_public_models_json_via_url(config: Optional[HGLocalizationConfig] = None) -> Optional[Dict[str, Any]]:
+    """Fetches the public_models.json via direct HTTPS GET if config.s3_bucket_name is set."""
+    if config is None:
+        config = default_config
+        
+    if not config.s3_bucket_name:
+        print("config.s3_bucket_name not configured. Cannot fetch public models JSON.")
+        return None
+
+    prefixed_json_key = _get_prefixed_s3_key(config.public_models_json_key, config)
+    json_url = _get_s3_public_url(config.s3_bucket_name, prefixed_json_key, config.s3_endpoint_url)
+    print(f"Attempting to fetch public models JSON from: {json_url}")
+    try:
+        response = requests.get(json_url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP error fetching {json_url}: {e}")
+        if e.response.status_code == 404:
+            print(f"{prefixed_json_key} not found at the public URL.")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching {json_url}: {e}")
+        return None
+    except json.JSONDecodeError:
+        print(f"Error: Content at {json_url} is not valid JSON.")
+        return None
+
+def _fetch_public_model_info(model_id: str, revision: Optional[str], config: Optional[HGLocalizationConfig] = None) -> Optional[Dict[str, str]]:
+    """Fetches a specific model's public metadata info from public_models.json using direct URL access."""
+    if config is None:
+        config = default_config
+        
+    public_config = _fetch_public_models_json_via_url(config)
+    if not public_config:
+        return None
+        
+    entry_key = f"{model_id}---{revision or config.default_revision_name}"
+    model_info = public_config.get(entry_key)
+    if model_info:
+        if not all(k in model_info for k in ["model_id", "s3_bucket"]):
+            print(f"Error: Public model info for {entry_key} is incomplete. Missing 'model_id' or 's3_bucket'.")
+            return None
+        print(f"Found public model info for {entry_key}: {model_info}")
+        return model_info
+    else:
+        print(f"Public model info not found for {entry_key} in {config.public_models_json_key}")
+        return None
 
 # --- Full Model Download Utilities ---
 
@@ -386,7 +514,7 @@ def download_model_metadata(model_id: str, revision: Optional[str] = None, make_
                 pass
             
             # Check for common weight file patterns
-            weight_patterns = ["pytorch_model.bin", "model.safetensors", "pytorch_model-00001-of-*.bin"]
+            weight_patterns = ["pytorch_model.bin", "model.safetensors"]
             for pattern in weight_patterns:
                 try:
                     s3_client.head_object(Bucket=config.s3_bucket_name, Key=f"{s3_prefix_path_for_model}/{pattern}")
@@ -472,9 +600,21 @@ def download_model_metadata(model_id: str, revision: Optional[str] = None, make_
                 s3_prefix_path_for_upload = _get_model_s3_prefix(model_id, revision, config)
                 _upload_directory_to_s3(s3_client_for_upload, local_save_path, config.s3_bucket_name, s3_prefix_path_for_upload)
                 
-                # TODO: Implement public model metadata functionality similar to datasets
+                # Implement public model metadata functionality similar to datasets
                 if make_public:
-                    print(f"Making model metadata public is not yet implemented for {model_id} {version_str}")
+                    print(f"Making model metadata public for {model_id} {version_str}...")
+                    
+                    # Make model metadata files (card and config) public
+                    if _make_model_metadata_public(s3_client_for_upload, config.s3_bucket_name, model_id, revision, local_save_path, config):
+                        print(f"Successfully made model metadata files public")
+                        
+                        # Update the public models manifest
+                        if _update_public_models_json(s3_client_for_upload, config.s3_bucket_name, model_id, revision, config):
+                            print(f"Successfully updated public models manifest for {model_id} {version_str}")
+                        else:
+                            print(f"Warning: Failed to update public models manifest for {model_id} {version_str}")
+                    else:
+                        print(f"Warning: Failed to make some model metadata files public for {model_id} {version_str}")
         
         return True, str(local_save_path)
 
@@ -676,10 +816,43 @@ def list_s3_models(config: Optional[HGLocalizationConfig] = None) -> List[Dict[s
                 return []
     else:
         print("AWS credentials not configured. Cannot list S3 models via authenticated API.")
-        return []
+
+    # Fallback or primary method if no AWS creds: list from public_models.json
+    # Only do this if we haven't populated available_s3_models from scanning yet.
+    if not available_s3_models:
+        print("Attempting to list S3 models from public_models.json...")
+        public_json_content = _fetch_public_models_json_via_url(config)
+        if public_json_content:
+            public_models_from_json = []
+            for entry_key, entry_data in public_json_content.items():
+                if isinstance(entry_data, dict) and all(k in entry_data for k in ["model_id", "s3_bucket"]):
+                    # Extract model card and config URLs if available
+                    model_card_url = entry_data.get("model_card_url")
+                    model_config_url = entry_data.get("model_config_url")
+                    
+                    public_models_from_json.append({
+                        "model_id": entry_data.get("model_id"),  # This should already be in original format from public JSON
+                        "revision": entry_data.get("revision"),  # Already None if not present or was default
+                        "has_card": bool(model_card_url),
+                        "has_config": bool(model_config_url),
+                        "has_tokenizer": False,  # Not tracked in public manifest
+                        "is_full_model": False,  # Public models are metadata-only
+                        "s3_card_url": model_card_url,
+                        "s3_config_url": model_config_url
+                    })
+                else:
+                    print(f"Skipping malformed entry in public_models.json: {entry_key}")
+            
+            if public_models_from_json:
+                print("Listing S3 models based on public_models.json.")
+                available_s3_models.extend(public_models_from_json)  # Extend, in case authenticated scan found some but errored before completing
+            else:
+                print(f"No models found or listed in {config.public_models_json_key} at public URL (or it was empty).")
+        else:
+            print(f"Could not fetch or parse {config.public_models_json_key} from public URL.")
 
     if not available_s3_models:
-        print("No S3 models found.")
+        print(f"No models found in S3 bucket '{config.s3_bucket_name}' by scanning or from public list.")
     else:
         print(f"Found {len(available_s3_models)} S3 model(s):")
         for model_info in available_s3_models:

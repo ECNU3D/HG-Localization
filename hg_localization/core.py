@@ -8,7 +8,8 @@ from .config import (
     AWS_SECRET_ACCESS_KEY, S3_DATA_PREFIX,
     DATASETS_STORE_PATH,
     DEFAULT_CONFIG_NAME, DEFAULT_REVISION_NAME,
-    PUBLIC_DATASETS_JSON_KEY, PUBLIC_DATASETS_ZIP_DIR_PREFIX
+    PUBLIC_DATASETS_JSON_KEY, PUBLIC_DATASETS_ZIP_DIR_PREFIX,
+    PUBLIC_MODELS_JSON_KEY
 )
 
 # Import utility functions (these are mostly internal)
@@ -63,6 +64,7 @@ __all__ = [
     "DEFAULT_REVISION_NAME",
     "PUBLIC_DATASETS_JSON_KEY",
     "PUBLIC_DATASETS_ZIP_DIR_PREFIX",
+    "PUBLIC_MODELS_JSON_KEY",
     
     # Dataset Management Functions
     "download_dataset",

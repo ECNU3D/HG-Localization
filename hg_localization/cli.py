@@ -9,6 +9,7 @@ from .dataset_manager import (
 from .model_manager import (
     download_model_metadata,
     list_local_models,
+    list_s3_models,
     get_model_card_content,
     get_cached_model_card_content,
     get_cached_model_config_content
@@ -18,17 +19,19 @@ from .model_manager import (
 
 @click.group()
 def cli():
-    """CLI for Hugging Face dataset localization with S3 support."""
+    """CLI for Hugging Face dataset and model localization with S3 support."""
     pass
 
-@cli.command()
+# --- Dataset Commands ---
+
+@cli.command("download-dataset")
 @click.argument('dataset_id')
 @click.option('--name', '-n', default=None, help='The specific dataset configuration name (e.g., "mrpc" for glue, "en" for wikiann).')
 @click.option('--revision', '-r', default=None, help='The git revision (branch, tag, commit hash) of the dataset.')
 @click.option('--trust-remote-code', is_flag=True, help="Allow running code from the dataset's repository.")
 @click.option('--make-public', is_flag=True, help="Zip and upload the dataset to a public S3 location with a public-read ACL, and update public_datasets.json.")
 @click.option('--no-s3-upload', is_flag=True, help="Disable uploading the dataset to S3, only cache locally.")
-def download(dataset_id: str, name: str | None, revision: str | None, trust_remote_code: bool, make_public: bool, no_s3_upload: bool):
+def download_dataset_cmd(dataset_id: str, name: str | None, revision: str | None, trust_remote_code: bool, make_public: bool, no_s3_upload: bool):
     """Downloads dataset from Hugging Face, caches locally, and uploads to S3 if configured (unless --no-s3-upload is specified)."""
     click.echo(f"Processing dataset: {dataset_id} (Config: {name or 'default'}, Revision: {revision or 'default'}, Trust code: {trust_remote_code}, Make public: {make_public}, No S3 Upload: {no_s3_upload})...")
     success, message = download_dataset(
@@ -46,8 +49,8 @@ def download(dataset_id: str, name: str | None, revision: str | None, trust_remo
     else:
         click.secho(f"Failed to process '{dataset_id}'. Error: {message}", fg="red")
 
-@cli.command("list-local")
-def list_local_cmd():
+@cli.command("list-local-datasets")
+def list_local_datasets_cmd():
     """Lists datasets available in the local cache."""
     click.echo("Listing local datasets from cache...")
     datasets = list_local_datasets(config=default_config)
@@ -61,8 +64,8 @@ def list_local_cmd():
         rev = ds_info.get('revision') or 'default'      # Display 'default' if None
         click.echo(f"  - ID: {click.style(ds_id, fg='blue')}, Config: {click.style(cfg_name, fg='green')}, Revision: {click.style(rev, fg='yellow')}")
 
-@cli.command("list-s3")
-def list_s3_command():
+@cli.command("list-s3-datasets")
+def list_s3_datasets_cmd():
     """Lists datasets available in the configured S3 bucket."""
     click.echo("Listing datasets from S3...")
     s3_datasets = list_s3_datasets(config=default_config)
@@ -84,12 +87,12 @@ def list_s3_command():
             output += ", Card (S3): Not available"
         click.echo(output)
 
-@cli.command("sync-local-to-s3")
+@cli.command("sync-local-dataset-to-s3")
 @click.argument('dataset_id')
 @click.option('--name', '-n', default=None, help='The specific dataset configuration name. Optional.')
 @click.option('--revision', '-r', default=None, help='The git revision of the dataset. Optional.')
 @click.option('--make-public', is_flag=True, help="Zip and upload the dataset to a public S3 location, and update public_datasets.json.")
-def sync_local_to_s3_cmd(dataset_id: str, name: str | None, revision: str | None, make_public: bool):
+def sync_local_dataset_to_s3_cmd(dataset_id: str, name: str | None, revision: str | None, make_public: bool):
     """Syncs a specific local dataset to S3. Uploads if not present; can also make public."""
     click.echo(f"Attempting to sync local dataset to S3: {dataset_id} (Config: {name or 'default'}, Revision: {revision or 'default'}, Make public: {make_public})")
     # Note: sync_local_dataset_to_s3 is now directly imported from dataset_manager
@@ -155,6 +158,32 @@ def list_local_models_cmd():
         model_type = "Full Model" if model_info.get('is_full_model', False) else "Metadata Only"
         type_color = 'green' if model_info.get('is_full_model', False) else 'cyan'
         click.echo(f"  - ID: {click.style(model_id, fg='blue')}, Revision: {click.style(rev, fg='yellow')}, Type: {click.style(model_type, fg=type_color)}, Card: {has_card}, Config: {has_config}")
+
+@cli.command("list-s3-models")
+def list_s3_models_cmd():
+    """Lists models available in the configured S3 bucket."""
+    click.echo("Listing models from S3...")
+    s3_models = list_s3_models(config=default_config)
+    if not s3_models:
+        click.echo("No models found in S3 or S3 not configured/accessible.")
+        return
+
+    click.echo(f"Found {len(s3_models)} model version(s) in S3:")
+    for model_info in s3_models:
+        model_id = model_info.get('model_id', 'N/A')
+        rev = model_info.get('revision') or "default"
+        has_card = 'Yes' if model_info.get('has_card') else 'No'
+        has_config = 'Yes' if model_info.get('has_config') else 'No'
+        model_type = "Full Model" if model_info.get('is_full_model', False) else "Metadata Only"
+        s3_card_url = model_info.get('s3_card_url')
+        s3_config_url = model_info.get('s3_config_url')
+
+        output = f"  - ID: {model_id}, Revision: {rev}, Type: {model_type}, Card: {has_card}, Config: {has_config}"
+        if s3_card_url:
+            output += f", Card URL: {s3_card_url}"
+        if s3_config_url:
+            output += f", Config URL: {s3_config_url}"
+        click.echo(output)
 
 @cli.command("show-model-card")
 @click.argument('model_id')

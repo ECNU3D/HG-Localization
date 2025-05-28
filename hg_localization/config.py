@@ -21,7 +21,8 @@ class HGLocalizationConfig:
         default_config_name: str = "default_config",
         default_revision_name: str = "default_revision",
         public_datasets_json_key: str = "public_datasets.json",
-        public_datasets_zip_dir_prefix: str = "public_datasets_zip"
+        public_datasets_zip_dir_prefix: str = "public_datasets_zip",
+        public_models_json_key: str = "public_models.json"
     ):
         """
         Initialize configuration.
@@ -38,6 +39,7 @@ class HGLocalizationConfig:
             default_revision_name: Default revision name for datasets
             public_datasets_json_key: S3 key for public datasets manifest
             public_datasets_zip_dir_prefix: S3 prefix for public dataset zips
+            public_models_json_key: S3 key for public models manifest
         """
         self.s3_bucket_name = s3_bucket_name
         self.s3_endpoint_url = s3_endpoint_url
@@ -69,6 +71,7 @@ class HGLocalizationConfig:
         self.default_revision_name = default_revision_name
         self.public_datasets_json_key = public_datasets_json_key
         self.public_datasets_zip_dir_prefix = public_datasets_zip_dir_prefix
+        self.public_models_json_key = public_models_json_key
     
     @property
     def public_datasets_store_path(self) -> Path:
@@ -94,7 +97,8 @@ class HGLocalizationConfig:
             default_config_name=os.environ.get("HGLOC_DEFAULT_CONFIG_NAME", "default_config"),
             default_revision_name=os.environ.get("HGLOC_DEFAULT_REVISION_NAME", "default_revision"),
             public_datasets_json_key=os.environ.get("HGLOC_PUBLIC_DATASETS_JSON_KEY", "public_datasets.json"),
-            public_datasets_zip_dir_prefix=os.environ.get("HGLOC_PUBLIC_DATASETS_ZIP_DIR_PREFIX", "public_datasets_zip")
+            public_datasets_zip_dir_prefix=os.environ.get("HGLOC_PUBLIC_DATASETS_ZIP_DIR_PREFIX", "public_datasets_zip"),
+            public_models_json_key=os.environ.get("HGLOC_PUBLIC_MODELS_JSON_KEY", "public_models.json")
         )
     
     def is_s3_configured(self) -> bool:
@@ -125,4 +129,5 @@ DATASETS_STORE_PATH = default_config.datasets_store_path
 DEFAULT_CONFIG_NAME = default_config.default_config_name
 DEFAULT_REVISION_NAME = default_config.default_revision_name
 PUBLIC_DATASETS_JSON_KEY = default_config.public_datasets_json_key
-PUBLIC_DATASETS_ZIP_DIR_PREFIX = default_config.public_datasets_zip_dir_prefix 
+PUBLIC_DATASETS_ZIP_DIR_PREFIX = default_config.public_datasets_zip_dir_prefix
+PUBLIC_MODELS_JSON_KEY = default_config.public_models_json_key 
