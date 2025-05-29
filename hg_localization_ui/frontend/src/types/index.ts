@@ -6,6 +6,12 @@ export interface S3Config {
   s3_data_prefix?: string;
 }
 
+export interface DefaultConfig {
+  s3_bucket_name?: string;
+  s3_endpoint_url?: string;
+  s3_data_prefix?: string;
+}
+
 export interface ConfigStatus {
   configured: boolean;
   has_credentials: boolean;

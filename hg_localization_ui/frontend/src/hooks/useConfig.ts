@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { api } from '../api/client';
-import { S3Config, ConfigStatus } from '../types';
+import { S3Config, ConfigStatus, DefaultConfig } from '../types';
 
 export const useConfigStatus = () => {
   const queryClient = useQueryClient();
@@ -31,6 +31,17 @@ export const useConfigStatus = () => {
   }, [queryClient]);
 
   return query;
+};
+
+export const useDefaultConfig = () => {
+  return useQuery({
+    queryKey: ['config', 'defaults'],
+    queryFn: async () => {
+      const response = await api.config.getDefaults();
+      return response.data;
+    },
+    staleTime: 1000 * 60 * 60, // 1 hour - defaults don't change often
+  });
 };
 
 export const useSetConfig = () => {

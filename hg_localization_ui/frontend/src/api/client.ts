@@ -1,6 +1,7 @@
 import axios, { AxiosResponse } from 'axios';
 import {
   S3Config,
+  DefaultConfig,
   ConfigStatus,
   DatasetInfo,
   DatasetDownloadRequest,
@@ -69,6 +70,9 @@ export const api = {
     
     getStatus: (): Promise<AxiosResponse<ConfigStatus>> =>
       apiClient.get('/config/status'),
+    
+    getDefaults: (): Promise<AxiosResponse<DefaultConfig>> =>
+      apiClient.get('/config/defaults'),
     
     clearConfig: (): Promise<AxiosResponse<{ message: string }>> =>
       apiClient.delete('/config'),

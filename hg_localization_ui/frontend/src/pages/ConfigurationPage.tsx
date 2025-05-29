@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Save, AlertCircle, CheckCircle, Info, Trash2 } from 'lucide-react';
-import { useConfigStatus, useSetConfig, useClearConfig } from '../hooks/useConfig';
+import { useConfigStatus, useSetConfig, useClearConfig, useDefaultConfig } from '../hooks/useConfig';
 import { S3Config } from '../types';
 
 export const ConfigurationPage: React.FC = () => {
   const navigate = useNavigate();
   const { data: configStatus, isLoading } = useConfigStatus();
+  const { data: defaultConfig, isLoading: isLoadingDefaults } = useDefaultConfig();
   const setConfigMutation = useSetConfig();
   const clearConfigMutation = useClearConfig();
 
@@ -32,6 +33,18 @@ export const ConfigurationPage: React.FC = () => {
       setShowCredentials(configStatus.has_credentials);
     }
   }, [configStatus]);
+
+  // Populate default values when defaults are loaded and form is empty
+  useEffect(() => {
+    if (defaultConfig && !configStatus?.configured) {
+      setFormData(prev => ({
+        ...prev,
+        s3_bucket_name: prev.s3_bucket_name || defaultConfig.s3_bucket_name || '',
+        s3_endpoint_url: prev.s3_endpoint_url || defaultConfig.s3_endpoint_url || '',
+        s3_data_prefix: prev.s3_data_prefix || defaultConfig.s3_data_prefix || '',
+      }));
+    }
+  }, [defaultConfig, configStatus?.configured]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,7 +75,11 @@ export const ConfigurationPage: React.FC = () => {
     }));
   };
 
-  if (isLoading) {
+  const hasDefaultValue = (field: 's3_bucket_name' | 's3_endpoint_url' | 's3_data_prefix'): boolean => {
+    return !!(defaultConfig && defaultConfig[field] && !configStatus?.configured);
+  };
+
+  if (isLoading || isLoadingDefaults) {
     return (
       <div className="flex items-center justify-center min-h-96">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
@@ -78,6 +95,20 @@ export const ConfigurationPage: React.FC = () => {
           Configure your S3 settings to access datasets. You can use public access (bucket name only) 
           or private access (with credentials).
         </p>
+        {defaultConfig && (defaultConfig.s3_bucket_name || defaultConfig.s3_endpoint_url || defaultConfig.s3_data_prefix) && (
+          <div className="mt-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <div className="flex">
+              <Info className="w-5 h-5 text-blue-600 mt-0.5 mr-2 flex-shrink-0" />
+              <div className="text-sm text-blue-800">
+                <p className="font-medium">Default Values Available</p>
+                <p>
+                  Some configuration values have been pre-filled from environment variables. 
+                  You can modify them as needed.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Access Mode Selection */}
@@ -128,11 +159,16 @@ export const ConfigurationPage: React.FC = () => {
             <div>
               <label className="label">
                 S3 Bucket Name <span className="text-red-500">*</span>
+                {hasDefaultValue('s3_bucket_name') && (
+                  <span className="ml-2 text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded">
+                    Default from environment
+                  </span>
+                )}
               </label>
               <input
                 type="text"
                 required
-                className="input"
+                className={`input ${hasDefaultValue('s3_bucket_name') ? 'border-blue-300 bg-blue-50' : ''}`}
                 placeholder="my-datasets-bucket"
                 value={formData.s3_bucket_name}
                 onChange={(e) => handleInputChange('s3_bucket_name', e.target.value)}
@@ -144,10 +180,17 @@ export const ConfigurationPage: React.FC = () => {
 
             {/* S3 Endpoint URL */}
             <div>
-              <label className="label">S3 Endpoint URL</label>
+              <label className="label">
+                S3 Endpoint URL
+                {hasDefaultValue('s3_endpoint_url') && (
+                  <span className="ml-2 text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded">
+                    Default from environment
+                  </span>
+                )}
+              </label>
               <input
                 type="url"
-                className="input"
+                className={`input ${hasDefaultValue('s3_endpoint_url') ? 'border-blue-300 bg-blue-50' : ''}`}
                 placeholder="https://s3.amazonaws.com (leave empty for AWS S3)"
                 value={formData.s3_endpoint_url}
                 onChange={(e) => handleInputChange('s3_endpoint_url', e.target.value)}
@@ -159,10 +202,17 @@ export const ConfigurationPage: React.FC = () => {
 
             {/* S3 Data Prefix */}
             <div>
-              <label className="label">S3 Data Prefix</label>
+              <label className="label">
+                S3 Data Prefix
+                {hasDefaultValue('s3_data_prefix') && (
+                  <span className="ml-2 text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded">
+                    Default from environment
+                  </span>
+                )}
+              </label>
               <input
                 type="text"
-                className="input"
+                className={`input ${hasDefaultValue('s3_data_prefix') ? 'border-blue-300 bg-blue-50' : ''}`}
                 placeholder="datasets/ (optional namespace)"
                 value={formData.s3_data_prefix}
                 onChange={(e) => handleInputChange('s3_data_prefix', e.target.value)}

@@ -8,6 +8,11 @@ class S3Config(BaseModel):
     aws_secret_access_key: Optional[str] = Field(None, description="AWS secret access key")
     s3_data_prefix: Optional[str] = Field("", description="S3 data prefix")
 
+class DefaultConfig(BaseModel):
+    s3_bucket_name: Optional[str] = Field(None, description="Default S3 bucket name from environment")
+    s3_endpoint_url: Optional[str] = Field(None, description="Default S3 endpoint URL from environment")
+    s3_data_prefix: Optional[str] = Field(None, description="Default S3 data prefix from environment")
+
 class ConfigStatus(BaseModel):
     configured: bool
     has_credentials: bool

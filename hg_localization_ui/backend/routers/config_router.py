@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Request, Response
-from models import S3Config, ConfigStatus
+from models import S3Config, ConfigStatus, DefaultConfig
 from config import (
     encode_config_cookie, 
     get_config_from_request, 
     get_config_status_from_config,
+    get_default_config,
     COOKIE_NAME,
     COOKIE_MAX_AGE
 )
@@ -64,4 +65,9 @@ async def clear_config(response: Response):
         secure=False,  # Set to True in production with HTTPS
         samesite="lax"
     )
-    return {"message": "Configuration cleared successfully"} 
+    return {"message": "Configuration cleared successfully"}
+
+@router.get("/defaults", response_model=DefaultConfig)
+async def get_default_configuration():
+    """Get default configuration values from environment variables"""
+    return get_default_config() 

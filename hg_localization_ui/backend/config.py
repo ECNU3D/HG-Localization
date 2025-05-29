@@ -1,15 +1,24 @@
 import json
 import base64
+import os
 from typing import Optional
 from fastapi import Request
 
-from models import S3Config, ConfigStatus
+from models import S3Config, ConfigStatus, DefaultConfig
 from hg_localization import HGLocalizationConfig
 from hg_localization.s3_utils import _get_s3_client
 
 # Cookie configuration
 COOKIE_NAME = "hg_localization_config"
 COOKIE_MAX_AGE = 30 * 24 * 60 * 60  # 30 days in seconds
+
+def get_default_config() -> DefaultConfig:
+    """Load default configuration values from environment variables"""
+    return DefaultConfig(
+        s3_bucket_name=os.getenv("HGLOC_S3_BUCKET_NAME"),
+        s3_endpoint_url=os.getenv("HGLOC_S3_ENDPOINT_URL"),
+        s3_data_prefix=os.getenv("HGLOC_S3_DATA_PREFIX")
+    )
 
 def encode_config_cookie(config: S3Config) -> str:
     """Encode configuration as a base64 cookie value"""
