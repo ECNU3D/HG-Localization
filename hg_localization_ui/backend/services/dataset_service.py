@@ -162,8 +162,12 @@ def get_dataset_preview_service(dataset_id: str, config_name: Optional[str], rev
 def get_dataset_card_service(dataset_id: str, config_name: Optional[str], revision: Optional[str], 
                            try_huggingface: bool, config) -> str:
     """Get dataset card content"""
+    # Determine if we're in public access mode
+    from config import is_public_access_only
+    public_only = is_public_access_only(config)
+    
     # First try to get cached card content (local cache and S3)
-    card_content = get_cached_dataset_card_content(dataset_id, config_name, revision, config=config)
+    card_content = get_cached_dataset_card_content(dataset_id, config_name, revision, config=config, public_access_only=public_only)
     
     # Only try Hugging Face if explicitly requested and no cached content found
     if not card_content and try_huggingface:

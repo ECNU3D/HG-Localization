@@ -197,28 +197,45 @@ def get_dataset_card_content(dataset_id: str, revision: Optional[str] = None) ->
         print(f"Error loading dataset card for '{dataset_id}' (revision: {revision or 'main'}): {e}")
         return None
 
-def get_cached_dataset_card_content(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None) -> Optional[str]:
+def get_cached_dataset_card_content(dataset_id: str, config_name: Optional[str] = None, revision: Optional[str] = None, config: Optional[HGLocalizationConfig] = None, public_access_only: bool = False) -> Optional[str]:
     """Retrieves dataset card content, prioritizing local cache, then private S3."""
     if config is None:
         config = default_config
         
-    local_dataset_dir = _get_dataset_path(dataset_id, config_name, revision, config)
-    local_card_file_path = local_dataset_dir / "dataset_card.md"
     version_str = f"(dataset: {dataset_id}, config: {config_name or 'default'}, revision: {revision or 'default'})"
 
-    if local_card_file_path.exists() and local_card_file_path.is_file():
-        print(f"Found dataset card locally for {version_str} at {local_card_file_path}")
-        try:
-            with open(local_card_file_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except IOError as e:
-            print(f"Error reading local dataset card {local_card_file_path}: {e}")
+    # Determine which paths to check based on access mode
+    if public_access_only:
+        # Public access only - check public path only
+        paths_to_check = [_get_dataset_path(dataset_id, config_name, revision, config, is_public=True)]
+        print(f"Public access mode: checking public cache only for dataset card '{dataset_id}' {version_str}")
+    else:
+        # Private access - check public path first (preferred), then private path
+        public_path = _get_dataset_path(dataset_id, config_name, revision, config, is_public=True)
+        private_path = _get_dataset_path(dataset_id, config_name, revision, config, is_public=False)
+        paths_to_check = [public_path, private_path]
+        print(f"Private access mode: checking both public and private cache for dataset card '{dataset_id}' {version_str}")
+    
+    # Try to find the dataset card in the available paths
+    for local_dataset_dir in paths_to_check:
+        local_card_file_path = local_dataset_dir / "dataset_card.md"
+        if local_card_file_path.exists() and local_card_file_path.is_file():
+            print(f"Found dataset card locally for {version_str} at {local_card_file_path}")
+            try:
+                with open(local_card_file_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except IOError as e:
+                print(f"Error reading local dataset card {local_card_file_path}: {e}")
 
     print(f"Dataset card not found or readable locally for {version_str}. Checking S3 (private path)...")
     s3_client = _get_s3_client(config)
     if s3_client and config.s3_bucket_name:
         s3_prefix_path = _get_s3_prefix(dataset_id, config_name, revision, config) # This now comes from s3_utils and includes S3_DATA_PREFIX
         s3_card_key = f"{s3_prefix_path.rstrip('/')}/dataset_card.md"
+        
+        # Use the first path from paths_to_check as the download destination
+        local_dataset_dir = paths_to_check[0]
+        local_card_file_path = local_dataset_dir / "dataset_card.md"
         
         try:
             print(f"Attempting to download dataset card from S3: s3://{config.s3_bucket_name}/{s3_card_key}")
@@ -583,7 +600,7 @@ def load_local_dataset(dataset_id: str, config_name: Optional[str] = None, revis
                             os.remove(tmp_zip_file_path)
                         except OSError: 
                             pass
-            else:
+        else:
                  if not (local_dataset_path and local_dataset_path.exists() and \
                         ((local_dataset_path / "dataset_info.json").exists() or \
                          (local_dataset_path / "dataset_dict.json").exists())):
