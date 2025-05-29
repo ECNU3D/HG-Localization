@@ -407,7 +407,7 @@ def _update_private_datasets_index(s3_client: Any, bucket_name: str, dataset_id:
         "s3_prefix": s3_prefix_path,
         "s3_bucket": bucket_name,
         "has_card": has_card,
-        "last_updated": json.dumps({"timestamp": str(Path(__file__).stat().st_mtime)})  # Simple timestamp
+        "last_updated": str(Path(__file__).stat().st_mtime)  # Simple timestamp
     }
 
     try:
@@ -581,7 +581,7 @@ def _update_private_models_index(s3_client: Any, bucket_name: str, model_id: str
         "has_config": has_config,
         "has_tokenizer": has_tokenizer,
         "is_full_model": is_full_model,
-        "last_updated": json.dumps({"timestamp": str(Path(__file__).stat().st_mtime)})  # Simple timestamp
+        "last_updated": str(Path(__file__).stat().st_mtime)  # Simple timestamp
     }
 
     try:

@@ -27,7 +27,7 @@ def test_download_command_success(mock_dataset_manager_functions):
     runner = CliRunner()
     mock_dataset_manager_functions["download_dataset"].return_value = (True, "/fake/path/to/dataset")
     
-    result = runner.invoke(cli, ["download", "test_dataset", "--name", "config1", "-r", "rev1", "--trust-remote-code", "--no-s3-upload"])
+    result = runner.invoke(cli, ["download-dataset", "test_dataset", "--name", "config1", "-r", "rev1", "--trust-remote-code", "--no-s3-upload"])
     
     assert result.exit_code == 0
     assert "Successfully processed 'test_dataset'" in result.output
@@ -45,7 +45,7 @@ def test_download_command_success(mock_dataset_manager_functions):
 def test_download_command_failure(mock_dataset_manager_functions):
     runner = CliRunner()
     mock_dataset_manager_functions["download_dataset"].return_value = (False, "Mocked download error")
-    result = runner.invoke(cli, ["download", "test_dataset_fail"])
+    result = runner.invoke(cli, ["download-dataset", "test_dataset_fail"])
     assert result.exit_code == 0 # Click commands usually exit 0 even on app-level failure, relying on output
     assert "Failed to process 'test_dataset_fail'" in result.output
     assert "Error: Mocked download error" in result.output
@@ -53,7 +53,7 @@ def test_download_command_failure(mock_dataset_manager_functions):
 def test_list_local_command_empty(mock_dataset_manager_functions):
     runner = CliRunner()
     mock_dataset_manager_functions["list_local_datasets"].return_value = []
-    result = runner.invoke(cli, ["list-local"])
+    result = runner.invoke(cli, ["list-local-datasets"])
     assert result.exit_code == 0
     assert "No datasets found in local cache." in result.output
 
@@ -64,7 +64,7 @@ def test_list_local_command_with_data(mock_dataset_manager_functions):
         {"dataset_id": "ds2", "config_name": None, "revision": None} # Test None for default display
     ]
     mock_dataset_manager_functions["list_local_datasets"].return_value = mock_data
-    result = runner.invoke(cli, ["list-local"])
+    result = runner.invoke(cli, ["list-local-datasets"])
     assert result.exit_code == 0
     assert "Available local datasets (cache):" in result.output
     assert "ID: ds1, Config: cfgA, Revision: revB" in result.output
@@ -74,7 +74,7 @@ def test_list_local_command_with_data(mock_dataset_manager_functions):
 def test_list_s3_command_empty(mock_dataset_manager_functions):
     runner = CliRunner()
     mock_dataset_manager_functions["list_s3_datasets"].return_value = []
-    result = runner.invoke(cli, ["list-s3"])
+    result = runner.invoke(cli, ["list-s3-datasets"])
     assert result.exit_code == 0
     assert "No datasets found in S3 or S3 not configured/accessible." in result.output
 
@@ -85,7 +85,7 @@ def test_list_s3_command_with_data(mock_dataset_manager_functions):
         {"dataset_id": "s3_ds2", "config_name": None, "revision": "s3_revC", "s3_card_url": None}
     ]
     mock_dataset_manager_functions["list_s3_datasets"].return_value = mock_data
-    result = runner.invoke(cli, ["list-s3"])
+    result = runner.invoke(cli, ["list-s3-datasets"])
     assert result.exit_code == 0
     assert f"Found {len(mock_data)} dataset version(s) in S3:" in result.output
     assert "ID: s3_ds1, Config: s3_cfgA, Revision: s3_revB, Card (S3): http://s3_card_link_1" in result.output
@@ -95,7 +95,7 @@ def test_list_s3_command_with_data(mock_dataset_manager_functions):
 def test_sync_local_to_s3_command_success(mock_dataset_manager_functions):
     runner = CliRunner()
     mock_dataset_manager_functions["sync_local_dataset_to_s3"].return_value = (True, "Sync successful mock message")
-    result = runner.invoke(cli, ["sync-local-to-s3", "my_dataset_to_sync", "--name", "specific_config", "--make-public"])
+    result = runner.invoke(cli, ["sync-local-dataset-to-s3", "my_dataset_to_sync", "--name", "specific_config", "--make-public"])
     
     assert result.exit_code == 0
     assert "Successfully synced 'my_dataset_to_sync'" in result.output
@@ -111,7 +111,7 @@ def test_sync_local_to_s3_command_success(mock_dataset_manager_functions):
 def test_sync_local_to_s3_command_failure(mock_dataset_manager_functions):
     runner = CliRunner()
     mock_dataset_manager_functions["sync_local_dataset_to_s3"].return_value = (False, "Mocked sync error")
-    result = runner.invoke(cli, ["sync-local-to-s3", "failed_sync_ds"])
+    result = runner.invoke(cli, ["sync-local-dataset-to-s3", "failed_sync_ds"])
     
     assert result.exit_code == 0 # Click command itself succeeds
     assert "Failed to sync 'failed_sync_ds'" in result.output

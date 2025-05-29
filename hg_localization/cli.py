@@ -12,7 +12,9 @@ from .model_manager import (
     list_s3_models,
     get_model_card_content,
     get_cached_model_card_content,
-    get_cached_model_config_content
+    get_cached_model_config_content,
+    sync_local_model_to_s3,
+    sync_all_local_models_to_s3
 )
 # config might be imported if CLI needs direct access to config values, but usually not.
 # from .config import S3_BUCKET_NAME # Example, if needed
@@ -224,6 +226,29 @@ def show_model_config_cmd(model_id: str, revision: str | None):
         click.echo("=" * 80)
     else:
         click.secho(f"Model config not found for '{model_id}' (Revision: {revision or 'default'})", fg="red")
+
+@cli.command("sync-local-model-to-s3")
+@click.argument('model_id')
+@click.option('--revision', '-r', default=None, help='The git revision of the model. Optional.')
+@click.option('--make-public', is_flag=True, help='Make the model metadata public on S3 and update public_models.json.')
+def sync_local_model_to_s3_cmd(model_id: str, revision: str | None, make_public: bool):
+    """Syncs a specific local model to S3. Uploads if not present; can also make public."""
+    click.echo(f"Syncing local model '{model_id}' (revision: {revision or 'default'}) to S3...")
+    
+    success, message = sync_local_model_to_s3(model_id, revision=revision, make_public=make_public, config=default_config)
+    
+    if success:
+        click.secho(f"✓ {message}", fg="green")
+    else:
+        click.secho(f"✗ {message}", fg="red")
+
+@cli.command("sync-all-local-models-to-s3")
+@click.option('--make-public', is_flag=True, help='Make all model metadata public on S3 and update public_models.json.')
+def sync_all_local_models_to_s3_cmd(make_public: bool):
+    """Syncs all local models to S3. Uploads if not present; can also make public."""
+    click.echo(f"Syncing all local models to S3 (make public: {make_public})...")
+    
+    sync_all_local_models_to_s3(make_public=make_public, config=default_config)
 
 if __name__ == '__main__':
     cli() 

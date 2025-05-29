@@ -73,7 +73,7 @@ def _store_dataset_bucket_metadata(dataset_id: str, config_name: Optional[str] =
         "s3_bucket_name": config.s3_bucket_name,
         "s3_endpoint_url": config.s3_endpoint_url,
         "s3_data_prefix": config.s3_data_prefix,
-        "cached_timestamp": json.dumps({"timestamp": str(Path(__file__).stat().st_mtime)}),  # Simple timestamp
+        "cached_timestamp": str(Path(__file__).stat().st_mtime),  # Simple timestamp
         "is_public": is_public
     }
     
@@ -642,15 +642,22 @@ This dataset was uploaded locally using the HG-Localization library.
 This dataset contains the following features:
 """
                 # Try to add feature information if available
-                if hasattr(dataset_obj, 'features'):
-                    # Single Dataset
-                    for feature_name, feature_type in dataset_obj.features.items():
-                        card_content += f"- **{feature_name}**: {feature_type}\n"
-                elif hasattr(dataset_obj, 'column_names'):
-                    # DatasetDict - use first split
-                    first_split = list(dataset_obj.keys())[0]
-                    for feature_name, feature_type in dataset_obj[first_split].features.items():
-                        card_content += f"- **{feature_name}**: {feature_type}\n"
+                try:
+                    if hasattr(dataset_obj, 'features') and dataset_obj.features:
+                        # Single Dataset
+                        for feature_name, feature_type in dataset_obj.features.items():
+                            card_content += f"- **{feature_name}**: {feature_type}\n"
+                    elif hasattr(dataset_obj, 'column_names') and hasattr(dataset_obj, 'keys'):
+                        # DatasetDict - use first split
+                        keys = list(dataset_obj.keys())
+                        if keys:
+                            first_split = keys[0]
+                            if hasattr(dataset_obj[first_split], 'features') and dataset_obj[first_split].features:
+                                for feature_name, feature_type in dataset_obj[first_split].features.items():
+                                    card_content += f"- **{feature_name}**: {feature_type}\n"
+                except (AttributeError, TypeError, IndexError):
+                    # Handle cases where the dataset object doesn't have expected attributes
+                    card_content += "- Features information not available\n"
                 
                 card_content += f"""
 ## Usage

@@ -84,6 +84,7 @@ def mock_s3_utils_for_dm(mocker):
     mock_update_json = mocker.patch('hg_localization.dataset_manager._update_public_datasets_json')
     mock_get_public_url = mocker.patch('hg_localization.dataset_manager._get_s3_public_url')
     mock_get_presigned_card_url = mocker.patch('hg_localization.dataset_manager.get_s3_dataset_card_presigned_url')
+    mock_update_private_index = mocker.patch('hg_localization.dataset_manager._update_private_datasets_index')
     
     mock_s3_cli_instance = MagicMock()
     mock_get_s3_cli.return_value = mock_s3_cli_instance
@@ -105,7 +106,8 @@ def mock_s3_utils_for_dm(mocker):
         "_download_directory_from_s3": mock_download_dir,
         "_update_public_datasets_json": mock_update_json,
         "_get_s3_public_url": mock_get_public_url,
-        "get_s3_dataset_card_presigned_url": mock_get_presigned_card_url
+        "get_s3_dataset_card_presigned_url": mock_get_presigned_card_url,
+        "_update_private_datasets_index": mock_update_private_index
     }
 
 @pytest.fixture
@@ -1283,7 +1285,7 @@ def test_list_s3_datasets_empty_bucket(mock_fetch_public_json, mock_s3_utils_for
     assert datasets == []
     captured = capsys.readouterr()
     # Check for the message indicating no datasets found after scanning and failing/skipping public list
-    assert f"No datasets found in S3 bucket '{default_config.s3_bucket_name}' by scanning or from public list." in captured.out
+    assert f"No datasets found in S3 bucket '{default_config.s3_bucket_name}' by any method." in captured.out
     
     # The actual prefix used by list_s3_datasets for the initial scan.
     # default_config.s3_data_prefix defaults to ""
@@ -1481,7 +1483,7 @@ def test_list_s3_datasets_client_error_on_list(mock_fetch_public_json, mock_s3_u
     captured = capsys.readouterr()
     
     # Check that the function attempted the S3 scan
-    assert "Listing S3 datasets via authenticated API call (scanning bucket structure)..." in captured.out
+    assert "Listing S3 datasets via authenticated API call (scanning bucket structure - slow method)..." in captured.out
     mock_s3_utils_for_dm["s3_client_instance"].get_paginator.assert_called_once_with('list_objects_v2')
     # Check for the specific error message printed by the except block
     # This assertion needs to be robust to the actual error message from botocore/s3_utils
@@ -1489,7 +1491,7 @@ def test_list_s3_datasets_client_error_on_list(mock_fetch_public_json, mock_s3_u
     assert simulated_error_message in captured.out # The specific message from the ClientError
     # Check for the fallback messages
     assert "Falling back to check public list if applicable." in captured.out
-    assert f"No datasets found in S3 bucket '{default_config.s3_bucket_name}' by scanning or from public list." in captured.out
+    assert f"No datasets found in S3 bucket '{default_config.s3_bucket_name}' by any method." in captured.out
 
 # --- Tests for sync_local_dataset_to_s3 ---
 

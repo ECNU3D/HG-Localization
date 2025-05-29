@@ -72,6 +72,10 @@ def mock_all_dependencies(mocker):
     mock_get_safe_path = mocker.patch('hg_localization.dataset_manager._get_safe_path_component')
     mock_get_safe_path.side_effect = lambda x: x.replace("/", "_") if x else ""
     
+    # Mock private index update
+    mock_update_private_index = mocker.patch('hg_localization.dataset_manager._update_private_datasets_index')
+    mock_update_private_index.return_value = True
+    
     return {
         "load_dataset": mock_load_dataset,
         "dataset_instance": mock_dataset_instance,
@@ -83,7 +87,8 @@ def mock_all_dependencies(mocker):
         "upload_to_s3": mock_upload_to_s3,
         "fetch_public_info": mock_fetch_public_info,
         "get_card": mock_get_card,
-        "get_safe_path": mock_get_safe_path
+        "get_safe_path": mock_get_safe_path,
+        "update_private_index": mock_update_private_index
     }
 
 

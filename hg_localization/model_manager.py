@@ -78,7 +78,7 @@ def _store_model_bucket_metadata(model_id: str, revision: Optional[str] = None, 
         "s3_bucket_name": config.s3_bucket_name,
         "s3_endpoint_url": config.s3_endpoint_url,
         "s3_data_prefix": config.s3_data_prefix,
-        "cached_timestamp": json.dumps({"timestamp": str(Path(__file__).stat().st_mtime)}),
+        "cached_timestamp": str(Path(__file__).stat().st_mtime),
         "is_public": is_public,
         "type": "model"  # Distinguish from dataset metadata
     }
@@ -968,4 +968,140 @@ def _scan_legacy_model_structure(base_path: Path, config: HGLocalizationConfig, 
                         }
                         models.append(model_info)
     
-    return models 
+    return models
+
+def _check_s3_model_exists(s3_client: Any, bucket_name: str, s3_prefix_for_model_version: str) -> bool:
+    """Checks if a model (marker files) exists at the given S3 prefix for the model version."""
+    if not s3_client or not bucket_name:
+        return False
+    try:
+        # Check for model card first
+        s3_client.head_object(Bucket=bucket_name, Key=f"{s3_prefix_for_model_version.rstrip('/')}/model_card.md")
+        return True
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == '404':
+            try:
+                # Check for config.json as fallback
+                s3_client.head_object(Bucket=bucket_name, Key=f"{s3_prefix_for_model_version.rstrip('/')}/config.json")
+                return True
+            except ClientError as e2:
+                if e2.response.get('Error', {}).get('Code') == '404':
+                    return False
+                return False
+        return False
+    except Exception:
+        return False
+
+def sync_local_model_to_s3(model_id: str, revision: Optional[str] = None, make_public: bool = False, config: Optional[HGLocalizationConfig] = None) -> Tuple[bool, str]:
+    """Syncs a specific local model to S3. Uploads if not present; can also make public."""
+    if config is None:
+        config = default_config
+        
+    version_str = f"(revision: {revision or 'default'})"
+    print(f"Attempting to sync local model to S3: {model_id} {version_str}")
+
+    # Check both public and private paths for the model
+    public_path = _get_model_path(model_id, revision, config, is_public=True)
+    private_path = _get_model_path(model_id, revision, config, is_public=False)
+    
+    # Determine which local path to use (prefer public if it exists)
+    local_save_path = None
+    if public_path.exists() and ((public_path / "model_card.md").exists() or (public_path / "config.json").exists()):
+        local_save_path = public_path
+        print(f"Found model in public cache at {public_path}")
+    elif private_path.exists() and ((private_path / "model_card.md").exists() or (private_path / "config.json").exists()):
+        local_save_path = private_path
+        print(f"Found model in private cache at {private_path}")
+
+    if not local_save_path:
+        msg = f"Local model {model_id} {version_str} not found or is incomplete. Cannot sync."
+        print(msg)
+        return False, msg
+
+    s3_client = _get_s3_client(config)
+    if not s3_client or not config.s3_bucket_name:
+        msg = "S3 not configured (bucket name or client init failed). Cannot sync to S3."
+        if make_public: msg += " Cannot make model public."
+        print(msg)
+        return False, msg
+
+    # s3_prefix_path_for_model includes the S3_DATA_PREFIX
+    s3_prefix_path_for_model = _get_model_s3_prefix(model_id, revision, config)
+    private_s3_copy_exists = _check_s3_model_exists(s3_client, config.s3_bucket_name, s3_prefix_path_for_model)
+
+    if private_s3_copy_exists:
+        print(f"Model {model_id} {version_str} already exists as private S3 copy at s3://{config.s3_bucket_name}/{s3_prefix_path_for_model}.")
+    else:
+        print(f"Model {model_id} {version_str} not found on S3 (private). Uploading from {local_save_path} to s3://{config.s3_bucket_name}/{s3_prefix_path_for_model}")
+        try:
+            _upload_directory_to_s3(s3_client, local_save_path, config.s3_bucket_name, s3_prefix_path_for_model)
+            print(f"Successfully uploaded model '{model_id}' {version_str} to S3 (private).")
+            private_s3_copy_exists = True
+            
+            # Update private index for non-public uploads
+            if not make_public:
+                print(f"Updating private models index for {model_id} {version_str}...")
+                _update_private_models_index(s3_client, config.s3_bucket_name, model_id, revision, config)
+        except Exception as e:
+            msg = f"Error uploading model '{model_id}' {version_str} to S3 (private): {e}"
+            print(msg)
+            return False, msg
+
+    if make_public and private_s3_copy_exists:
+        print(f"Processing --make-public for model {model_id} {version_str}...")
+        
+        # Make model metadata files (card and config) public
+        if _make_model_metadata_public(s3_client, config.s3_bucket_name, model_id, revision, local_save_path, config):
+            print(f"Successfully made model metadata files public")
+            
+            # Update the public models manifest
+            if _update_public_models_json(s3_client, config.s3_bucket_name, model_id, revision, config):
+                print(f"Successfully updated public models manifest for {model_id} {version_str}")
+            else:
+                print(f"Warning: Failed to update public models manifest for {model_id} {version_str}")
+        else:
+            print(f"Warning: Failed to make some model metadata files public for {model_id} {version_str}")
+    elif make_public and not private_s3_copy_exists:
+        print(f"Cannot make {model_id} {version_str} public because its private S3 copy does not exist or failed to upload.")
+
+    final_msg = f"Sync process for {model_id} {version_str} completed."
+    print(final_msg)
+    return True, final_msg
+
+def sync_all_local_models_to_s3(make_public: bool = False, config: Optional[HGLocalizationConfig] = None) -> None:
+    """Iterates through all local models and attempts to sync them to S3."""
+    if config is None:
+        config = default_config
+        
+    print(f"Starting sync of all local models to S3. Make public: {make_public}")
+    # Use filter_by_bucket=False to sync all local models regardless of bucket configuration
+    local_models = list_local_models(config, filter_by_bucket=False)
+    if not local_models:
+        print("No local models found in cache to sync.")
+        return
+
+    succeeded_syncs = 0
+    failed_syncs = 0
+    
+    s3_client_check = _get_s3_client(config) # Check once if S3 is usable
+    if not s3_client_check or not config.s3_bucket_name:
+        print("S3 not configured (bucket name or client init failed). Cannot sync any models to S3.")
+        if make_public: print("Cannot make models public.")
+        return
+
+    for model_info in local_models:
+        model_id = model_info['model_id']
+        revision = model_info.get('revision')     
+        
+        print(f"\n--- Processing local model for sync: ID='{model_id}', Revision='{revision}' ---")
+        # sync_local_model_to_s3 will use its own S3 client instance
+        success, message = sync_local_model_to_s3(model_id, revision, make_public=make_public, config=config)
+        if success:
+            succeeded_syncs += 1
+        else:
+            failed_syncs += 1
+            
+    print("\n--- Sync all local models to S3 finished ---")
+    print(f"Total local models processed: {len(local_models)}")
+    print(f"Successfully processed (primary sync action): {succeeded_syncs}")
+    print(f"Failed to process (see logs for errors): {failed_syncs}") 
