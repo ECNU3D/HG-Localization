@@ -105,4 +105,32 @@ export interface ApiResponse<T> {
 export interface HealthStatus {
   status: string;
   service: string;
+}
+
+// Model Testing Types (NEW)
+export interface ModelTestingConfig {
+  enabled: boolean;
+  base_url?: string;
+  timeout: number;
+}
+
+export interface ModelTestRequest {
+  model_id: string;
+  api_key: string;
+  message: string;
+  image_data?: string;
+  image_type?: string;
+  image_filename?: string;
+}
+
+export interface ModelTestResponse {
+  success: boolean;
+  response?: string;
+  error?: string;
+}
+
+export interface ModelAvailabilityCheck {
+  model_id: string;
+  available: boolean;
+  error?: string;
 } 

@@ -16,6 +16,7 @@ from routers.config_router import router as config_router
 from routers.dataset_router import router as dataset_router
 from routers.model_router import router as model_router
 from routers.migration_router import router as migration_router
+from routers.model_testing_router import router as model_testing_router
 
 # Import WebSocket manager
 from websocket_manager import manager
@@ -49,6 +50,7 @@ app.include_router(config_router)
 app.include_router(dataset_router)
 app.include_router(model_router)
 app.include_router(migration_router)
+app.include_router(model_testing_router)
 
 # WebSocket endpoint for real-time updates
 @app.websocket("/ws")
@@ -73,7 +75,7 @@ if Path("static").exists():
 
 if __name__ == "__main__":
     uvicorn.run(
-        "main_new:app",
+        "main:app",
         host="0.0.0.0",
         port=8000,
         reload=True,

@@ -4,7 +4,7 @@ import os
 from typing import Optional
 from fastapi import Request
 
-from models import S3Config, ConfigStatus, DefaultConfig
+from models import S3Config, ConfigStatus, DefaultConfig, AppConfig
 from hg_localization import HGLocalizationConfig
 from hg_localization.s3_utils import _get_s3_client
 
@@ -97,4 +97,12 @@ def get_config_status_from_config(config: Optional[HGLocalizationConfig]) -> Con
         bucket_name=config.s3_bucket_name,
         endpoint_url=config.s3_endpoint_url,
         data_prefix=config.s3_data_prefix
-    ) 
+    )
+
+def get_app_config() -> AppConfig:
+    """Load application configuration from environment variables"""
+    return AppConfig(
+        openai_base_url=os.getenv("HGLOC_OPENAI_BASE_URL"),
+        enable_model_testing=os.getenv("HGLOC_ENABLE_MODEL_TESTING", "false").lower() == "true",
+        model_testing_timeout=int(os.getenv("HGLOC_MODEL_TESTING_TIMEOUT", "30"))
+    )

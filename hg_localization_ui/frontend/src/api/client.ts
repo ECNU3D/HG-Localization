@@ -13,6 +13,10 @@ import {
   ModelDownloadRequest,
   ModelCard,
   ModelConfig,
+  ModelTestingConfig,
+  ModelTestRequest,
+  ModelTestResponse,
+  ModelAvailabilityCheck,
 } from '../types';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
@@ -193,6 +197,26 @@ export const api = {
   // Health check
   health: (): Promise<AxiosResponse<HealthStatus>> =>
     apiClient.get('/health'),
+
+  // Model Testing endpoints (NEW)
+  modelTesting: {
+    getConfig: (): Promise<AxiosResponse<ModelTestingConfig>> =>
+      apiClient.get('/model-testing/config'),
+    
+    checkAvailability: (
+      modelId: string,
+      apiKey: string
+    ): Promise<AxiosResponse<ModelAvailabilityCheck>> => {
+      const params = new URLSearchParams();
+      params.append('model_id', modelId);
+      params.append('api_key', apiKey);
+      
+      return apiClient.post(`/model-testing/check-availability?${params}`);
+    },
+    
+    testModel: (request: ModelTestRequest): Promise<AxiosResponse<ModelTestResponse>> =>
+      apiClient.post('/model-testing/test', request),
+  },
 };
 
 // WebSocket connection for real-time updates
