@@ -898,7 +898,33 @@ def list_s3_datasets(config: Optional[HGLocalizationConfig] = None) -> List[Dict
         print("config.s3_bucket_name not configured. Cannot list S3 datasets.")
         return []
 
-    # Try to use private index first for much faster performance
+    # First, always try to get public datasets from public_datasets.json
+    print("Fetching public datasets from public_datasets.json...")
+    public_json_content = _fetch_public_datasets_json_via_url(config)
+    if public_json_content:
+        public_datasets_from_json = []
+        for entry_key, entry_data in public_json_content.items():
+            if isinstance(entry_data, dict) and all(k in entry_data for k in ["dataset_id", "s3_zip_key"]):
+                # For public list, card URL isn't directly available this way without another S3 call.
+                # We could generate a public URL to the card if we knew its exact key and it was public.
+                public_datasets_from_json.append({
+                    "dataset_id": entry_data.get("dataset_id"),  # This should already be in original format from public JSON
+                    "config_name": entry_data.get("config_name"), # Already None if not present or was default
+                    "revision": entry_data.get("revision"),     # Already None if not present or was default
+                    "s3_card_url": None # Card URL not available directly from public JSON manifest listing
+                })
+            else:
+                print(f"Skipping malformed entry in public_datasets.json: {entry_key}")
+        
+        if public_datasets_from_json:
+            print(f"Found {len(public_datasets_from_json)} public datasets from public_datasets.json.")
+            available_s3_datasets.extend(public_datasets_from_json)
+        else:
+            print(f"No datasets found or listed in {config.public_datasets_json_key} at public URL (or it was empty).")
+    else:
+        print(f"Could not fetch or parse {config.public_datasets_json_key} from public URL.")
+
+    # Then, try to get private datasets if credentials are available
     if config.aws_access_key_id and config.aws_secret_access_key:
         print("Attempting to list S3 datasets from private index (fast method)...")
         private_index = _fetch_private_datasets_index(config)
@@ -917,18 +943,34 @@ def list_s3_datasets(config: Optional[HGLocalizationConfig] = None) -> List[Dict
                             config=config
                         )
                     
-                    available_s3_datasets.append({
+                    private_dataset = {
                         "dataset_id": entry_data["dataset_id"],
                         "config_name": entry_data.get("config_name"),
                         "revision": entry_data.get("revision"),
                         "s3_card_url": s3_card_url
-                    })
+                    }
+                    
+                    # Check if this dataset already exists in public datasets to avoid duplicates
+                    dataset_key = f"{private_dataset['dataset_id']}_{private_dataset.get('config_name', '')}_{private_dataset.get('revision', '')}"
+                    existing_dataset = None
+                    for existing in available_s3_datasets:
+                        existing_key = f"{existing['dataset_id']}_{existing.get('config_name', '')}_{existing.get('revision', '')}"
+                        if existing_key == dataset_key:
+                            existing_dataset = existing
+                            break
+                    
+                    if existing_dataset:
+                        # Merge private dataset data with existing public dataset data
+                        # Private datasets typically have more complete information, especially card URLs
+                        if not existing_dataset.get("s3_card_url") and private_dataset.get("s3_card_url"):
+                            existing_dataset["s3_card_url"] = private_dataset["s3_card_url"]
+                    else:
+                        # Add new private dataset
+                        available_s3_datasets.append(private_dataset)
                 else:
                     print(f"Skipping malformed entry in private datasets index: {entry_key}")
             
-            if available_s3_datasets:
-                print(f"Listed {len(available_s3_datasets)} S3 datasets from private index.")
-                return available_s3_datasets
+            print(f"Processed private datasets index with {len(private_index)} entries.")
         else:
             print("Private datasets index not found or could not be fetched. Falling back to bucket scanning...")
             
@@ -942,6 +984,7 @@ def list_s3_datasets(config: Optional[HGLocalizationConfig] = None) -> List[Dict
                 scan_base_prefix = config.s3_data_prefix.strip('/') + '/' if config.s3_data_prefix else ""
 
                 try:
+                    private_datasets_from_scan = []
                     # Iterate through dataset_id level
                     for page1 in paginator.paginate(Bucket=config.s3_bucket_name, Prefix=scan_base_prefix, Delimiter='/'):
                         for common_prefix1 in page1.get('CommonPrefixes', []): # These are "directories" at dataset_id level
@@ -983,51 +1026,53 @@ def list_s3_datasets(config: Optional[HGLocalizationConfig] = None) -> List[Dict
                                                     revision=revision_from_s3,
                                                     config=config
                                                 )
-                                                available_s3_datasets.append({
+                                                private_dataset = {
                                                     "dataset_id": _restore_dataset_name(dataset_id_from_s3),
                                                     "config_name": config_name_from_s3 if config_name_from_s3 != config.default_config_name else None,
                                                     "revision": revision_from_s3 if revision_from_s3 != config.default_revision_name else None,
                                                     "s3_card_url": s3_card_url
-                                                })
-                    if available_s3_datasets:
-                        print("Successfully listed S3 datasets by scanning bucket structure.")
-                        return available_s3_datasets
-                    print("No datasets found by scanning S3 bucket structure (or structure did not match expected format).")
+                                                }
+                                                private_datasets_from_scan.append(private_dataset)
+                    
+                    # Merge private datasets from scan with existing public datasets
+                    for private_dataset in private_datasets_from_scan:
+                        dataset_key = f"{private_dataset['dataset_id']}_{private_dataset.get('config_name', '')}_{private_dataset.get('revision', '')}"
+                        existing_dataset = None
+                        for existing in available_s3_datasets:
+                            existing_key = f"{existing['dataset_id']}_{existing.get('config_name', '')}_{existing.get('revision', '')}"
+                            if existing_key == dataset_key:
+                                existing_dataset = existing
+                                break
+                        
+                        if existing_dataset:
+                            # Merge private dataset data with existing public dataset data
+                            if not existing_dataset.get("s3_card_url") and private_dataset.get("s3_card_url"):
+                                existing_dataset["s3_card_url"] = private_dataset["s3_card_url"]
+                        else:
+                            # Add new private dataset
+                            available_s3_datasets.append(private_dataset)
+                    
+                    print(f"Scanned bucket and found {len(private_datasets_from_scan)} additional private datasets.")
+                    
                 except ClientError as e:
-                    print(f"Error listing S3 datasets via API: {e}. Falling back to check public list if applicable.")
+                    print(f"Error listing S3 datasets via API: {e}")
+                except Exception as e:
+                    print(f"Unexpected error listing S3 datasets via bucket scan: {e}")
             else:
-                print("S3 client could not be initialized despite credentials appearing to be set. Proceeding to check public list.")
-
-    # Fallback or primary method if no AWS creds: list from public_datasets.json
-    # Only do this if we haven't populated available_s3_datasets from scanning yet.
-    if not available_s3_datasets:
-        print("Attempting to list S3 datasets from public_datasets.json...")
-        public_json_content = _fetch_public_datasets_json_via_url(config)
-        if public_json_content:
-            public_datasets_from_json = []
-            for entry_key, entry_data in public_json_content.items():
-                if isinstance(entry_data, dict) and all(k in entry_data for k in ["dataset_id", "s3_zip_key"]):
-                    # For public list, card URL isn't directly available this way without another S3 call.
-                    # We could generate a public URL to the card if we knew its exact key and it was public.
-                    public_datasets_from_json.append({
-                        "dataset_id": entry_data.get("dataset_id"),  # This should already be in original format from public JSON
-                        "config_name": entry_data.get("config_name"), # Already None if not present or was default
-                        "revision": entry_data.get("revision"),     # Already None if not present or was default
-                        "s3_card_url": None # Card URL not available directly from public JSON manifest listing
-                    })
-                else:
-                    print(f"Skipping malformed entry in public_datasets.json: {entry_key}")
-            
-            if public_datasets_from_json:
-                print("Listing S3 datasets based on public_datasets.json.")
-                available_s3_datasets.extend(public_datasets_from_json) # Extend, in case authenticated scan found some but errored before completing
-            else:
-                print(f"No datasets found or listed in {config.public_datasets_json_key} at public URL (or it was empty).")
-        else:
-            print(f"Could not fetch or parse {config.public_datasets_json_key} from public URL.")
+                print("S3 client could not be initialized despite credentials appearing to be set. Cannot list private S3 datasets.")
+    else:
+        print("No AWS credentials provided. Only listing public datasets.")
     
     if not available_s3_datasets:
         print(f"No datasets found in S3 bucket '{config.s3_bucket_name}' by any method.")
+    else:
+        print(f"Found {len(available_s3_datasets)} S3 dataset(s) total (public + private):")
+        for dataset_info in available_s3_datasets:
+            print(f"  Dataset ID: {dataset_info['dataset_id']}, "
+                  f"Config: {dataset_info.get('config_name', config.default_config_name)}, "
+                  f"Revision: {dataset_info.get('revision', config.default_revision_name)}, "
+                  f"Card URL: {'Yes' if dataset_info.get('s3_card_url') else 'No'}")
+    
     return available_s3_datasets
 
 

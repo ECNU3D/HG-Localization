@@ -708,7 +708,39 @@ def list_s3_models(config: Optional[HGLocalizationConfig] = None) -> List[Dict[s
         print("config.s3_bucket_name not configured. Cannot list S3 models.")
         return []
 
-    # Try to use private index first for much faster performance
+    # First, always try to get public models from public_models.json
+    print("Fetching public models from public_models.json...")
+    public_json_content = _fetch_public_models_json_via_url(config)
+    if public_json_content:
+        public_models_from_json = []
+        for entry_key, entry_data in public_json_content.items():
+            if isinstance(entry_data, dict) and all(k in entry_data for k in ["model_id", "s3_bucket"]):
+                # Extract model card and config URLs if available
+                model_card_url = entry_data.get("model_card_url")
+                model_config_url = entry_data.get("model_config_url")
+                
+                public_models_from_json.append({
+                    "model_id": entry_data.get("model_id"),  # This should already be in original format from public JSON
+                    "revision": entry_data.get("revision"),  # Already None if not present or was default
+                    "has_card": bool(model_card_url),
+                    "has_config": bool(model_config_url),
+                    "has_tokenizer": False,  # Not tracked in public manifest
+                    "is_full_model": False,  # Public models are metadata-only
+                    "s3_card_url": model_card_url,
+                    "s3_config_url": model_config_url
+                })
+            else:
+                print(f"Skipping malformed entry in public_models.json: {entry_key}")
+        
+        if public_models_from_json:
+            print(f"Found {len(public_models_from_json)} public models from public_models.json.")
+            available_s3_models.extend(public_models_from_json)
+        else:
+            print(f"No models found or listed in {config.public_models_json_key} at public URL (or it was empty).")
+    else:
+        print(f"Could not fetch or parse {config.public_models_json_key} from public URL.")
+
+    # Then, try to get private models if credentials are available
     if config.aws_access_key_id and config.aws_secret_access_key:
         print("Attempting to list S3 models from private index (fast method)...")
         private_index = _fetch_private_models_index(config)
@@ -728,7 +760,7 @@ def list_s3_models(config: Optional[HGLocalizationConfig] = None) -> List[Dict[s
                         config_key = f"{entry_data['s3_prefix']}/config.json"
                         s3_config_url = _get_s3_public_url(config.s3_bucket_name, config_key, config.s3_endpoint_url)
                     
-                    available_s3_models.append({
+                    private_model = {
                         "model_id": entry_data["model_id"],
                         "revision": entry_data.get("revision"),
                         "has_card": entry_data.get("has_card", False),
@@ -737,13 +769,36 @@ def list_s3_models(config: Optional[HGLocalizationConfig] = None) -> List[Dict[s
                         "is_full_model": entry_data.get("is_full_model", False),
                         "s3_card_url": s3_card_url,
                         "s3_config_url": s3_config_url
-                    })
+                    }
+                    
+                    # Check if this model already exists in public models to avoid duplicates
+                    model_key = f"{private_model['model_id']}_{private_model.get('revision', '')}"
+                    existing_model = None
+                    for existing in available_s3_models:
+                        existing_key = f"{existing['model_id']}_{existing.get('revision', '')}"
+                        if existing_key == model_key:
+                            existing_model = existing
+                            break
+                    
+                    if existing_model:
+                        # Merge private model data with existing public model data
+                        # Private models typically have more complete information
+                        existing_model.update({
+                            "has_tokenizer": private_model["has_tokenizer"] or existing_model.get("has_tokenizer", False),
+                            "is_full_model": private_model["is_full_model"] or existing_model.get("is_full_model", False),
+                        })
+                        # Keep public URLs if they exist, otherwise use private ones
+                        if not existing_model.get("s3_card_url") and private_model.get("s3_card_url"):
+                            existing_model["s3_card_url"] = private_model["s3_card_url"]
+                        if not existing_model.get("s3_config_url") and private_model.get("s3_config_url"):
+                            existing_model["s3_config_url"] = private_model["s3_config_url"]
+                    else:
+                        # Add new private model
+                        available_s3_models.append(private_model)
                 else:
                     print(f"Skipping malformed entry in private models index: {entry_key}")
             
-            if available_s3_models:
-                print(f"Listed {len(available_s3_models)} S3 models from private index.")
-                return available_s3_models
+            print(f"Processed private models index with {len(private_index)} entries.")
         else:
             print("Private models index not found or could not be fetched. Falling back to bucket scanning...")
             
@@ -765,6 +820,7 @@ def list_s3_models(config: Optional[HGLocalizationConfig] = None) -> List[Dict[s
                         Delimiter='/'
                     )
                     
+                    private_models_from_scan = []
                     for page in level1_pages:
                         common_prefixes = page.get('CommonPrefixes', [])
                         for prefix_info in common_prefixes:
@@ -842,64 +898,64 @@ def list_s3_models(config: Optional[HGLocalizationConfig] = None) -> List[Dict[s
                                     if has_card:
                                         s3_card_url = _get_s3_public_url(config.s3_bucket_name, s3_card_key, config.s3_endpoint_url)
                                     
-                                    model_info = {
+                                    # Generate S3 config URL if config exists
+                                    s3_config_url = None
+                                    if has_config:
+                                        config_key = f"{revision_prefix}config.json"
+                                        s3_config_url = _get_s3_public_url(config.s3_bucket_name, config_key, config.s3_endpoint_url)
+                                    
+                                    private_model = {
                                         "model_id": model_id_orig,
                                         "revision": revision_display,
                                         "has_card": has_card,
                                         "has_config": has_config,
                                         "has_tokenizer": has_tokenizer,
                                         "is_full_model": is_full_model,
-                                        "s3_card_url": s3_card_url
+                                        "s3_card_url": s3_card_url,
+                                        "s3_config_url": s3_config_url
                                     }
-                                    available_s3_models.append(model_info)
+                                    private_models_from_scan.append(private_model)
+                    
+                    # Merge private models from scan with existing public models
+                    for private_model in private_models_from_scan:
+                        model_key = f"{private_model['model_id']}_{private_model.get('revision', '')}"
+                        existing_model = None
+                        for existing in available_s3_models:
+                            existing_key = f"{existing['model_id']}_{existing.get('revision', '')}"
+                            if existing_key == model_key:
+                                existing_model = existing
+                                break
+                        
+                        if existing_model:
+                            # Merge private model data with existing public model data
+                            existing_model.update({
+                                "has_tokenizer": private_model["has_tokenizer"] or existing_model.get("has_tokenizer", False),
+                                "is_full_model": private_model["is_full_model"] or existing_model.get("is_full_model", False),
+                            })
+                            # Keep public URLs if they exist, otherwise use private ones
+                            if not existing_model.get("s3_card_url") and private_model.get("s3_card_url"):
+                                existing_model["s3_card_url"] = private_model["s3_card_url"]
+                            if not existing_model.get("s3_config_url") and private_model.get("s3_config_url"):
+                                existing_model["s3_config_url"] = private_model["s3_config_url"]
+                        else:
+                            # Add new private model
+                            available_s3_models.append(private_model)
+                    
+                    print(f"Scanned bucket and found {len(private_models_from_scan)} additional private models.")
                     
                 except ClientError as e:
-                    print(f"Error listing S3 models: {e}")
-                    return []
+                    print(f"Error listing S3 models via bucket scan: {e}")
                 except Exception as e:
-                    print(f"Unexpected error listing S3 models: {e}")
-                    return []
+                    print(f"Unexpected error listing S3 models via bucket scan: {e}")
             else:
-                print("AWS credentials not configured. Cannot list S3 models via authenticated API.")
-
-    # Fallback or primary method if no AWS creds: list from public_models.json
-    # Only do this if we haven't populated available_s3_models from scanning yet.
-    if not available_s3_models:
-        print("Attempting to list S3 models from public_models.json...")
-        public_json_content = _fetch_public_models_json_via_url(config)
-        if public_json_content:
-            public_models_from_json = []
-            for entry_key, entry_data in public_json_content.items():
-                if isinstance(entry_data, dict) and all(k in entry_data for k in ["model_id", "s3_bucket"]):
-                    # Extract model card and config URLs if available
-                    model_card_url = entry_data.get("model_card_url")
-                    model_config_url = entry_data.get("model_config_url")
-                    
-                    public_models_from_json.append({
-                        "model_id": entry_data.get("model_id"),  # This should already be in original format from public JSON
-                        "revision": entry_data.get("revision"),  # Already None if not present or was default
-                        "has_card": bool(model_card_url),
-                        "has_config": bool(model_config_url),
-                        "has_tokenizer": False,  # Not tracked in public manifest
-                        "is_full_model": False,  # Public models are metadata-only
-                        "s3_card_url": model_card_url,
-                        "s3_config_url": model_config_url
-                    })
-                else:
-                    print(f"Skipping malformed entry in public_models.json: {entry_key}")
-            
-            if public_models_from_json:
-                print("Listing S3 models based on public_models.json.")
-                available_s3_models.extend(public_models_from_json)  # Extend, in case authenticated scan found some but errored before completing
-            else:
-                print(f"No models found or listed in {config.public_models_json_key} at public URL (or it was empty).")
-        else:
-            print(f"Could not fetch or parse {config.public_models_json_key} from public URL.")
+                print("AWS credentials not configured properly. Cannot list private S3 models via authenticated API.")
+    else:
+        print("No AWS credentials provided. Only listing public models.")
 
     if not available_s3_models:
         print(f"No models found in S3 bucket '{config.s3_bucket_name}' by any method.")
     else:
-        print(f"Found {len(available_s3_models)} S3 model(s):")
+        print(f"Found {len(available_s3_models)} S3 model(s) total (public + private):")
         for model_info in available_s3_models:
             model_type = "Full Model" if model_info.get('is_full_model', False) else "Metadata Only"
             print(f"  Model ID: {model_info['model_id']}, "
