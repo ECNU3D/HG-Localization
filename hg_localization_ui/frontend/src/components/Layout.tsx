@@ -1,5 +1,6 @@
 import React, { ReactNode } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import Link from 'next/link';
+import { useRouter } from 'next/router';
 import { Database, Settings, Home, Github, Brain } from 'lucide-react';
 import { useConfigStatus } from '../hooks/useConfig';
 
@@ -8,7 +9,7 @@ interface LayoutProps {
 }
 
 export const Layout: React.FC<LayoutProps> = ({ children }) => {
-  const location = useLocation();
+  const router = useRouter();
   const { data: configStatus } = useConfigStatus();
 
   const navigation = [
@@ -33,7 +34,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
   ];
 
   const isActive = (href: string) => {
-    return location.pathname === href || location.pathname.startsWith(href + '/');
+    return router.pathname === href || router.pathname.startsWith(href + '/');
   };
 
   return (
@@ -45,7 +46,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
             <div className="flex">
               {/* Logo */}
               <div className="flex-shrink-0 flex items-center">
-                <Link to="/" className="flex items-center space-x-2">
+                <Link href="/" className="flex items-center space-x-2">
                   <div className="w-8 h-8 bg-gradient-to-br from-primary-500 to-purple-600 rounded-lg flex items-center justify-center">
                     <Home className="w-5 h-5 text-white" />
                   </div>
@@ -62,7 +63,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
                   return (
                     <Link
                       key={item.name}
-                      to={item.href}
+                      href={item.href}
                       className={`inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium transition-colors duration-200 ${
                         isActive(item.href)
                           ? 'border-primary-500 text-primary-600'
@@ -126,7 +127,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
               return (
                 <Link
                   key={item.name}
-                  to={item.href}
+                  href={item.href}
                   className={`block pl-3 pr-4 py-2 border-l-4 text-base font-medium transition-colors duration-200 ${
                     isActive(item.href)
                       ? 'bg-primary-50 border-primary-500 text-primary-700'

@@ -21,12 +21,13 @@ A modern web interface for managing Hugging Face datasets with S3 integration, b
 - Real-time dataset operations
 - WebSocket support for download progress
 
-### Frontend (React + TypeScript)
-- Modern React 18 with TypeScript
+### Frontend (Next.js + TypeScript)
+- Modern Next.js 15 with TypeScript
+- File-based routing with dynamic routes
 - Tailwind CSS for styling
 - React Query for state management
-- React Router for navigation
 - Monaco Editor for code display
+- Server-side rendering capabilities
 
 ## Quick Start
 
@@ -60,18 +61,28 @@ cd ..
 
 4. **Start both services:**
 ```bash
-# Standard startup (clean output)
+# Development mode (Next.js dev server)
 python start_ui.py
+
+# Production mode (Next.js optimized build)
+python start_production.py
+
+# Custom ports (development)
+python start_custom_ports.py --backend-port 8001 --frontend-port 3001
 
 # With visible logs (see all hg_localization library logs)
 python start_with_logs.py
+
+# Custom ports with logs
+python start_with_logs_custom_ports.py -b 8001 -f 3001
 
 # Simple startup (if threading issues occur)
 python start_simple.py
 
 # Or start individual services:
 python start_ui.py --backend    # Backend only
-python start_ui.py --frontend   # Frontend only
+python start_ui.py --frontend   # Frontend only (Next.js dev)
+python start_production.py --frontend   # Frontend only (Next.js production)
 ```
 
 5. **Access the application:**
@@ -104,7 +115,7 @@ npm install
 
 2. Start the development server:
 ```bash
-npm start
+npm run dev
 ```
 
 3. Open http://localhost:3000 in your browser
@@ -197,9 +208,21 @@ black .  # Format code
 ### Frontend Development
 ```bash
 cd frontend
-npm run test     # Run tests
-npm run lint     # Lint code
-npm run build    # Build for production
+
+# Development server (hot reload)
+npm run dev
+
+# Production build
+npm run build
+
+# Start production server (after build)
+npm run start
+
+# Linting
+npm run lint
+
+# Run tests  
+npm run test
 ```
 
 ## Deployment

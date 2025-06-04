@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useRouter } from 'next/router';
 import { Save, AlertCircle, CheckCircle, Info, Trash2 } from 'lucide-react';
 import { useConfigStatus, useSetConfig, useClearConfig, useDefaultConfig } from '../hooks/useConfig';
 import { S3Config } from '../types';
 
 export const ConfigurationPage: React.FC = () => {
-  const navigate = useNavigate();
+  const router = useRouter();
   const { data: configStatus, isLoading } = useConfigStatus();
   const { data: defaultConfig, isLoading: isLoadingDefaults } = useDefaultConfig();
   const setConfigMutation = useSetConfig();
@@ -62,7 +62,7 @@ export const ConfigurationPage: React.FC = () => {
 
     try {
       await setConfigMutation.mutateAsync(configToSubmit);
-      navigate('/datasets');
+      router.push('/datasets');
     } catch (error) {
       console.error('Configuration failed:', error);
     }
@@ -236,7 +236,7 @@ export const ConfigurationPage: React.FC = () => {
                   <p className="font-medium">Security Note</p>
                   <p>
                     Credentials are stored temporarily in memory and are not persisted. 
-                    You'll need to re-enter them when you restart the application.
+                    You&apos;ll need to re-enter them when you restart the application.
                   </p>
                 </div>
               </div>

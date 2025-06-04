@@ -77,10 +77,10 @@ uvicorn.run(
     print(">> Starting frontend...")
     frontend_env = os.environ.copy()
     frontend_env['PORT'] = str(frontend_port)
-    frontend_env['REACT_APP_API_URL'] = f'http://localhost:{backend_port}/api'
+    frontend_env['NEXT_PUBLIC_API_URL'] = f'http://localhost:{backend_port}/api'  # Next.js public env var
     
     frontend_process = subprocess.Popen(
-        ["npm", "start"],
+        ["npm", "run", "dev"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=1,

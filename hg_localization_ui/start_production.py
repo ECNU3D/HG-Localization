@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Main startup script for HG-Localization UI
-Supports starting backend, frontend, or both services
+Production startup script for HG-Localization UI (Next.js)
+Builds and starts the production server
 """
-import argparse
 import os
 import subprocess
 import sys
+import signal
 import time
 from pathlib import Path
 
-def start_backend():
-    """Start the FastAPI backend server"""
-    print(">> Starting HG-Localization UI Backend...")
+def start_backend_production():
+    """Start the FastAPI backend server in production mode"""
+    print(">> Starting HG-Localization UI Backend (Production)...")
     
     # Add the parent directory to sys.path to import hg_localization
     sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -37,7 +37,7 @@ def start_backend():
             "main:app",
             host="0.0.0.0",
             port=8000,
-            reload=True,
+            reload=False,  # No reload in production
             log_level="info"
         )
     except ImportError as e:
@@ -51,9 +51,9 @@ def start_backend():
         os.chdir(original_cwd)
         sys.exit(1)
 
-def start_frontend():
-    """Start the Next.js frontend development server"""
-    print(">> Starting HG-Localization UI Frontend (Next.js)...")
+def start_frontend_production():
+    """Build and start the Next.js frontend production server"""
+    print(">> Starting HG-Localization UI Frontend (Next.js Production)...")
     
     frontend_dir = Path(__file__).parent / "frontend"
     
@@ -71,25 +71,32 @@ def start_frontend():
             print(f"ERROR: Error installing dependencies: {e}")
             sys.exit(1)
     
+    # Build the production application
+    print(">> Building frontend for production...")
+    try:
+        subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True, shell=True)
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: Error building frontend: {e}")
+        sys.exit(1)
+    
     print("OK Frontend will be available at: http://localhost:3000")
     
-    # Start the Next.js development server
+    # Start the production server
     try:
-        subprocess.run(["npm", "run", "dev"], cwd=frontend_dir, check=True, shell=True)
+        subprocess.run(["npm", "run", "start"], cwd=frontend_dir, check=True, shell=True)
     except subprocess.CalledProcessError as e:
         print(f"ERROR: Error starting frontend: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
         print("\nSTOP: Frontend server stopped.")
 
-def start_both():
-    """Start both backend and frontend in separate processes"""
-    print(">> Starting HG-Localization UI (Backend + Frontend)...")
+def start_both_production():
+    """Start both backend and frontend in production mode"""
+    print(">> Starting HG-Localization UI (Production Mode)...")
     
     # Start backend in a separate process
     backend_process = subprocess.Popen(
         [sys.executable, str(Path(__file__)), "--backend"]
-        # Note: Not capturing stdout/stderr so logs are visible
     )
     
     # Give backend time to start
@@ -107,24 +114,32 @@ def start_both():
     except:
         print("WARN: Backend may not be ready yet")
     
-    # Start frontend in main thread
-    try:
-        start_frontend()
-    except KeyboardInterrupt:
+    def signal_handler(sig, frame):
         print("\nSTOP: Shutting down services...")
         backend_process.terminate()
         backend_process.wait(timeout=5)
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # Start frontend in main thread
+    try:
+        start_frontend_production()
+    except KeyboardInterrupt:
+        signal_handler(signal.SIGINT, None)
 
 def main():
     """Main entry point"""
+    import argparse
+    
     parser = argparse.ArgumentParser(
-        description="Start HG-Localization UI services",
+        description="Start HG-Localization UI services in production mode",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python start_ui.py              # Start both backend and frontend
-  python start_ui.py --backend    # Start only backend
-  python start_ui.py --frontend   # Start only frontend
+  python start_production.py              # Start both backend and frontend (production)
+  python start_production.py --backend    # Start only backend (production)
+  python start_production.py --frontend   # Start only frontend (production)
         """
     )
     
@@ -142,19 +157,19 @@ Examples:
     args = parser.parse_args()
     
     print("=" * 60)
-    print(">> HG-Localization UI Startup Script")
+    print(">> HG-Localization UI Production Startup Script")
     print("=" * 60)
     
     if args.backend and args.frontend:
         print("ERROR: Cannot specify both --backend and --frontend")
         sys.exit(1)
     elif args.backend:
-        start_backend()
+        start_backend_production()
     elif args.frontend:
-        start_frontend()
+        start_frontend_production()
     else:
         # Default: start both
-        start_both()
+        start_both_production()
 
 if __name__ == "__main__":
     main() 

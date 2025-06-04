@@ -23,8 +23,8 @@ def start_services_with_custom_ports(backend_port=8000, frontend_port=3000):
     env = os.environ.copy()
     env['HGLOC_BACKEND_PORT'] = str(backend_port)
     env['HGLOC_FRONTEND_PORT'] = str(frontend_port)
-    env['PORT'] = str(frontend_port)  # For React dev server
-    env['REACT_APP_API_URL'] = f'http://localhost:{backend_port}/api'
+    env['PORT'] = str(frontend_port)  # For Next.js dev server
+    env['NEXT_PUBLIC_API_URL'] = f'http://localhost:{backend_port}/api'  # Next.js public env var
     
     # Start backend with custom port
     print(">> Starting backend...")
@@ -89,7 +89,7 @@ uvicorn.run(
     frontend_dir = Path(__file__).parent / "frontend"
     
     frontend_process = subprocess.Popen([
-        "npm", "start"
+        "npm", "run", "dev"
     ], cwd=frontend_dir, env=env, shell=True)
     
     print("OK Services starting...")

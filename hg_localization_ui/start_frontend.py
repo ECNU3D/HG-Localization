@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Startup script for HG-Localization UI Frontend
+Startup script for HG-Localization UI Frontend (Next.js)
 """
 import os
 import subprocess
@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 
 def main():
-    """Start the React frontend development server"""
-    print("Starting HG-Localization UI Frontend...")
+    """Start the Next.js frontend development server"""
+    print("Starting HG-Localization UI Frontend (Next.js)...")
     print("Frontend will be available at: http://localhost:3000")
     print("Press Ctrl+C to stop the server")
     
@@ -26,9 +26,9 @@ def main():
         print("Installing frontend dependencies...")
         subprocess.run(["npm", "install"], cwd=frontend_dir, check=True, shell=True)
     
-    # Start the development server
+    # Start the Next.js development server
     try:
-        subprocess.run(["npm", "start"], cwd=frontend_dir, check=True, shell=True)
+        subprocess.run(["npm", "run", "dev"], cwd=frontend_dir, check=True, shell=True)
     except subprocess.CalledProcessError as e:
         print(f"Error starting frontend: {e}")
         sys.exit(1)

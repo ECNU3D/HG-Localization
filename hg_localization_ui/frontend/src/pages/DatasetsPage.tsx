@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import Link from 'next/link';
 import { Search, Download, Database, Cloud, HardDrive, Filter, RefreshCw, Server } from 'lucide-react';
 import { useDatasets, useCacheDataset, useDownloadDatasetZip } from '../hooks/useDatasets';
 import { useConfigStatus } from '../hooks/useConfig';
@@ -210,7 +210,7 @@ export const DatasetsPage: React.FC = () => {
                 : 'No datasets are available. Configure your S3 settings or download some datasets.'}
             </p>
             {!searchTerm && sourceFilter === 'all' && (
-              <Link to="/config" className="btn-primary">
+              <Link href="/config" className="btn-primary">
                 Configure S3 Settings
               </Link>
             )}
@@ -238,7 +238,7 @@ export const DatasetsPage: React.FC = () => {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center space-x-3">
                       <Link
-                        to={`/datasets/${encodeURIComponent(dataset.dataset_id)}?config=${dataset.config_name || ''}&revision=${dataset.revision || ''}`}
+                        href={`/datasets/${encodeURIComponent(dataset.dataset_id)}?config=${dataset.config_name || ''}&revision=${dataset.revision || ''}`}
                         className="text-lg font-semibold text-primary-600 hover:text-primary-700 truncate"
                       >
                         {dataset.dataset_id}
@@ -326,7 +326,7 @@ export const DatasetsPage: React.FC = () => {
                     )}
 
                     <Link
-                      to={`/datasets/${encodeURIComponent(dataset.dataset_id)}?config=${dataset.config_name || ''}&revision=${dataset.revision || ''}`}
+                      href={`/datasets/${encodeURIComponent(dataset.dataset_id)}?config=${dataset.config_name || ''}&revision=${dataset.revision || ''}`}
                       className="btn-primary"
                     >
                       View Details

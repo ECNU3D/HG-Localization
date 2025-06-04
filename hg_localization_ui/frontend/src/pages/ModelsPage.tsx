@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import Link from 'next/link';
 import { Search, Brain, Cloud, HardDrive, Filter, RefreshCw, Server, FileText, Settings, CheckCircle } from 'lucide-react';
 import { useModels, useCacheModel } from '../hooks/useModels';
 import { useConfigStatus } from '../hooks/useConfig';
@@ -202,7 +202,7 @@ export const ModelsPage: React.FC = () => {
                 : 'No models are available. Configure your S3 settings or upload some models.'}
             </p>
             {!searchTerm && sourceFilter === 'all' && (
-              <Link to="/config" className="btn-primary">
+              <Link href="/config" className="btn-primary">
                 Configure S3 Settings
               </Link>
             )}
@@ -228,7 +228,7 @@ export const ModelsPage: React.FC = () => {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center space-x-3">
                       <Link
-                        to={`/models/${encodeURIComponent(model.model_id)}${model.revision ? `?revision=${encodeURIComponent(model.revision)}` : ''}`}
+                        href={`/models/${encodeURIComponent(model.model_id)}${model.revision ? `?revision=${encodeURIComponent(model.revision)}` : ''}`}
                         className="text-lg font-semibold text-primary-600 hover:text-primary-700 truncate flex items-center space-x-2"
                       >
                         {getModelIcon(model)}
@@ -315,7 +315,7 @@ export const ModelsPage: React.FC = () => {
                     )}
 
                     <Link
-                      to={`/models/${encodeURIComponent(model.model_id)}${model.revision ? `?revision=${encodeURIComponent(model.revision)}` : ''}`}
+                      href={`/models/${encodeURIComponent(model.model_id)}${model.revision ? `?revision=${encodeURIComponent(model.revision)}` : ''}`}
                       className="btn-primary"
                     >
                       View Details

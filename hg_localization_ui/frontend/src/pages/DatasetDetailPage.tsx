@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { useParams, useSearchParams, Link } from 'react-router-dom';
+import { useRouter } from 'next/router';
+import Link from 'next/link';
 import { ArrowLeft, Eye, FileText, Code, Download, ExternalLink, ChevronDown, ChevronRight, Copy, Check } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -222,10 +223,10 @@ const JsonViewer: React.FC<{ data: any; name: string }> = ({ data, name }) => {
 };
 
 export const DatasetDetailPage: React.FC = () => {
-  const { datasetId } = useParams<{ datasetId: string }>();
-  const [searchParams] = useSearchParams();
-  const configName = searchParams.get('config') || undefined;
-  const revision = searchParams.get('revision') || undefined;
+  const router = useRouter();
+  const { datasetId } = router.query;
+  const configName = router.query.config as string || undefined;
+  const revision = router.query.revision as string || undefined;
   
   const [activeTab, setActiveTab] = useState<'preview' | 'card' | 'examples'>('preview');
   
@@ -235,25 +236,25 @@ export const DatasetDetailPage: React.FC = () => {
     data: preview, 
     isLoading: previewLoading, 
     error: previewError 
-  } = useDatasetPreview(datasetId!, configName, revision, activeTab === 'preview');
+  } = useDatasetPreview(datasetId as string, configName, revision, activeTab === 'preview');
 
   const { 
     data: card, 
     isLoading: cardLoading, 
     error: cardError 
-  } = useDatasetCard(datasetId!, configName, revision, activeTab === 'card');
+  } = useDatasetCard(datasetId as string, configName, revision, activeTab === 'card');
 
   const { 
     data: examples, 
     isLoading: examplesLoading 
-  } = useDatasetExamples(datasetId!, configName, revision, activeTab === 'examples');
+  } = useDatasetExamples(datasetId as string, configName, revision, activeTab === 'examples');
 
   const handleDownload = async () => {
     if (!datasetId) return;
     
     try {
       await downloadZipMutation.mutateAsync({
-        datasetId: datasetId,
+        datasetId: datasetId as string,
         configName: configName,
         revision: revision,
       });
@@ -282,7 +283,7 @@ export const DatasetDetailPage: React.FC = () => {
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-4">
           <Link
-            to="/datasets"
+            href="/datasets"
             className="btn-outline flex items-center space-x-2"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -308,7 +309,7 @@ export const DatasetDetailPage: React.FC = () => {
 
         <div className="flex items-center space-x-3">
           <a
-            href={`https://huggingface.co/datasets/${datasetId.replace(/_/g, '/')}`}
+            href={`https://huggingface.co/datasets/${(datasetId as string)?.replace(/_/g, '/')}`}
             target="_blank"
             rel="noopener noreferrer"
             className="btn-outline flex items-center space-x-2"
@@ -453,7 +454,7 @@ export const DatasetDetailPage: React.FC = () => {
             ) : cardError ? (
               <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
                 <p className="text-yellow-800">
-                  Dataset card not available. This might be a private dataset or the card hasn't been created yet.
+                  Dataset card not available. This might be a private dataset or the card hasn&apos;t been created yet.
                 </p>
               </div>
             ) : card ? (
