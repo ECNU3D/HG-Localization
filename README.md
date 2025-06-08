@@ -32,6 +32,24 @@ This solution enables teams to efficiently manage AI assets (datasets and models
 *   **Real-time Progress**: Live updates for download and upload operations
 *   **Code Generation**: Auto-generated Python snippets for programmatic dataset usage
 
+### UI Screenshots
+
+#### Dataset Management Interface
+![Dataset Management Interface](docs/images/dataset_management.png)
+*Dataset browsing and management interface showing available datasets, their configurations, and download options.*
+
+#### Model Management Interface
+![Model Management Interface](docs/images/model_management.png)
+*Model browsing and management interface displaying available models, their metadata, and download options. Includes model cards, configuration details, and version information.*
+
+#### Model Testing Interface
+![Model Testing Interface](docs/images/model_testing.png)
+*Interactive model testing interface with prompt input, response display, and model configuration options.*
+
+#### Configuration Settings
+![Configuration Settings](docs/images/config_settings.png)
+*Dynamic configuration panel for managing S3 credentials and API endpoints.*
+
 ## Features
 
 *   **CLI for Dataset & Model Operations**: Easily download, register, list, and sync both datasets and models using the `hg-localize` command with precise specification of IDs, configurations, and revisions
